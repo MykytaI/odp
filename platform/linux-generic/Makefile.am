@@ -181,6 +181,8 @@ noinst_HEADERS = \
 		  pktio/common.h \
 		  pktio/sysfs.h \
 		  pktio/dpdk.h \
+		  pktio/mdev.h \
+		  pktio/uapi_net_mdev.h \
 		  include/odp_pktio_ops_ipc.h \
 		  include/odp_pktio_ops_loopback.h \
 		  include/odp_pktio_ops_netmap.h \
@@ -255,6 +257,7 @@ __LIB__libodp_linux_la_SOURCES = \
 			   pktio/sysfs.c \
 			   pktio/tap.c \
 			   pktio/ring.c \
+			   pktio/mdev.c \
 			   pool/generic.c \
 			   pool/subsystem.c \
 			   odp_pkt_queue.c \
