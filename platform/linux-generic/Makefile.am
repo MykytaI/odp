@@ -259,6 +259,7 @@ __LIB__libodp_linux_la_SOURCES = \
 			   pktio/ring.c \
 			   pktio/mdev.c \
 			   pktio/mdev/i40e.c \
+			   pktio/mdev/cxgb4.c \
 			   pool/generic.c \
 			   pool/subsystem.c \
 			   odp_pkt_queue.c \
