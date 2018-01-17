@@ -16,9 +16,6 @@ ODP_VERSION_API_MAJOR=odpapi_major_version
 AC_SUBST(ODP_VERSION_API_MAJOR)
 ODP_VERSION_API_MINOR=odpapi_minor_version
 AC_SUBST(ODP_VERSION_API_MINOR)
-AC_CONFIG_FILES([include/odp/api/spec/version.h
-                 include/odp/api/spec/deprecated.h])
-
 AM_INIT_AUTOMAKE([1.9 tar-pax subdir-objects foreign nostdinc])
 AC_CONFIG_SRCDIR([include/odp/api/spec/init.h])
 AM_CONFIG_HEADER([include/config.h])
@@ -58,7 +55,7 @@ AC_PROG_LN_S
 
 AM_PROG_AR
 #Use libtool
-LT_INIT([])
+LT_INIT([dlopen])
 AC_SUBST([LIBTOOL_DEPS])
 AM_PROG_LIBTOOL
 
@@ -72,7 +69,7 @@ AC_CHECK_FUNCS([bzero clock_gettime gethostbyname getpagesize gettimeofday mallo
 
 # Checks for header files.
 AC_HEADER_RESOLV
-AC_CHECK_HEADERS([arpa/inet.h fcntl.h inttypes.h limits.h netdb.h netinet/in.h stddef.h stdint.h stdlib.h string.h sys/ioctl.h sys/socket.h sys/time.h unistd.h])
+AC_CHECK_HEADERS([arpa/inet.h fcntl.h inttypes.h limits.h netdb.h netinet/in.h stddef.h stdint.h stdlib.h string.h sys/ioctl.h sys/socket.h sys/time.h unistd.h dlfcn.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
 AC_HEADER_STDBOOL
@@ -99,6 +96,9 @@ CC_VERSION_PATCH=$(echo $CC_VERSION | cut -d'.' -f3)
 ##########################################################################
 # Allow valgrind suite to run against the defined tests
 ##########################################################################
+AX_VALGRIND_DFLT([sgcheck], [off])
+AX_VALGRIND_DFLT([helgrind], [off])
+AX_VALGRIND_DFLT([drd], [off])
 AX_VALGRIND_CHECK
 
 ##########################################################################
@@ -114,6 +114,7 @@ AS_CASE([$host],
   [ARCH_DIR=undefined]
 )
 AC_SUBST([ARCH_DIR])
+AM_CONDITIONAL([ARCH_IS_X86], [test "x${ARCH_DIR}" = "xx86"])
 
 ##########################################################################
 # Warn on the defaults if arch is undefined
@@ -161,24 +162,6 @@ AC_ARG_WITH([platform],
     ])
 
 AC_SUBST([with_platform])
-AC_SUBST([platform_with_platform], ["platform/${with_platform}"])
-
-##########################################################################
-# Run platform specific checks and settings
-##########################################################################
-IMPLEMENTATION_NAME=""
-if test "${with_platform}" = "linux-generic";
-then
-    m4_include([./platform/linux-generic/m4/configure.m4])
-    m4_include([./test/linux-generic/m4/configure.m4])
-    IMPLEMENTATION_NAME="odp-linux"
-else
-    echo "UNSUPPORTED PLATFORM: ${with_platform}"
-    exit 1
-fi
-
-AC_DEFINE_UNQUOTED([IMPLEMENTATION_NAME], ["$IMPLEMENTATION_NAME"],
-		   [Define to the name of the implementation])
 
 ##########################################################################
 # Include m4 files
@@ -199,10 +182,29 @@ AC_HELP_STRING([--with-sdk-install-path=DIR path to external libs and headers],
 AC_SUBST(SDK_INSTALL_PATH)
 
 ##########################################################################
+# Run platform specific checks and settings
+##########################################################################
+IMPLEMENTATION_NAME=""
+AS_IF([test "${with_platform}" = "linux-generic"],
+         [m4_include([./platform/linux-generic/m4/configure.m4])]
+         [IMPLEMENTATION_NAME="linux-generic"]
+         [ODP_CFLAGS="$ODP_CFLAGS -std=c99"]
+         [ODP_LIB_STR="odp-linux"],
+      [test "${with_platform}" = "linux-dpdk"],
+          [m4_include([./platform/linux-dpdk/m4/configure.m4])]
+          [IMPLEMENTATION_NAME="linux-dpdk"]
+          [ODP_CFLAGS="$ODP_CFLAGS -std=gnu99"]
+          [ODP_LIB_STR="odp-dpdk"],
+      [echo "UNSUPPORTED PLATFORM: ${with_platform}"])
+
+ODP_CFLAGS="$ODP_CFLAGS -DIMPLEMENTATION_NAME=$IMPLEMENTATION_NAME"
+AC_SUBST(ODP_LIB_STR)
+
+##########################################################################
 # Set the install directory for test binaries/scripts
 ##########################################################################
 AC_ARG_WITH([testdir],
-    [AC_HELP_STRING([--with-testdir=DIR], [installation directory for tests])],
+    [AS_HELP_STRING([--with-testdir=DIR], [installation directory for tests])],
 	[testdir=$withval],
 	[testdir=no])
 AS_IF([test "x$testdir" = "xyes"], [testdir=$libdir/odp/tests],
@@ -223,6 +225,8 @@ AM_CONDITIONAL([ARCH_IS_AARCH64], [test "x${ARCH_DIR}" = "xaarch64"])
 AM_CONDITIONAL([ARCH_IS_MIPS64], [test "x${ARCH_DIR}" = "xmips64"])
 AM_CONDITIONAL([ARCH_IS_POWERPC], [test "x${ARCH_DIR}" = "xpowerpc"])
 AM_CONDITIONAL([ARCH_IS_X86], [test "x${ARCH_DIR}" = "xx86"])
+AM_CONDITIONAL([ARCH_IS_X86_32], [test "x${ARCH_ABI}" = "xx86_32-linux"])
+AM_CONDITIONAL([ARCH_IS_X86_64], [test "x${ARCH_ABI}" = "xx86_64-linux"])
 
 ##########################################################################
 # Setup doxygen documentation
@@ -353,10 +357,10 @@ esac
 CFLAGS="$CFLAGS $ODP_CFLAGS"
 CXXFLAGS="$CXXFLAGS $ODP_CXXFLAGS"
 
-AC_CONFIG_FILES([Makefile
-		 pkgconfig/libodp-linux.pc
-		 pkgconfig/libodphelper.pc
-		 ])
+AC_CONFIG_FILES([Makefile])
+AC_CONFIG_FILES([include/Makefile
+		 include/odp/api/spec/version.h
+		 include/odp/api/spec/deprecated.h])
 
 ##########################################################################
 # distribute the changed variables among the Makefiles
@@ -406,4 +410,5 @@ AC_MSG_RESULT([
 	test_helper:		${test_helper}
 	test_example:		${test_example}
 	user_guides:		${user_guides}
+	mdev:			${mdev_support}
 ])

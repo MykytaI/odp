@@ -19,6 +19,7 @@
 extern "C" {
 #endif
 
+#include <odp/api/deprecated.h>
 #include <odp/api/packet_io_stats.h>
 #include <odp/api/queue.h>
 #include <odp/api/time.h>
@@ -255,11 +256,27 @@ typedef struct odp_pktio_param_t {
  * belong to time synchronization protocol (PTP).
  *
  * Packet input checksum checking may be enabled or disabled. When it is
- * enabled, implementation will verify checksum correctness on incoming packets
- * and depending on drop configuration either deliver erroneous packets with
- * appropriate flags set (e.g. odp_packet_has_l3_error()) or drop those.
- * When packet dropping is enabled, application will never receive a packet
- * with the specified error and may avoid to check the error flag.
+ * enabled, implementation will attempt to verify checksum correctness on
+ * incoming packets and depending on drop configuration either deliver erroneous
+ * packets with appropriate flags set (e.g. odp_packet_has_l3_error(),
+ * odp_packet_l3_chksum_status()) or drop those. When packet dropping is
+ * enabled, application will never receive a packet with the specified error
+ * and may avoid to check the error flag.
+ *
+ * If checksum checking is enabled, IPv4 header checksum checking is always
+ * done for packets that do not have IP options and L4 checksum checking
+ * is done for unfragmented packets that do not have IPv4 options or IPv6
+ * extension headers. In other cases checksum checking may or may not
+ * be done. For example, L4 checksum of fragmented packets is typically
+ * not checked.
+ *
+ * IPv4 checksum checking may be enabled only when parsing level is
+ * ODP_PKTIO_PARSER_LAYER_L3 or higher. Similarly, L4 level checksum checking
+ * may be enabled only with parsing level ODP_PKTIO_PARSER_LAYER_L4 or higher.
+ *
+ * Whether checksum checking was done and whether a checksum was correct
+ * can be queried for each received packet with odp_packet_l3_chksum_status()
+ * and odp_packet_l4_chksum_status().
  */
 typedef union odp_pktin_config_opt_t {
 	/** Option flags */
@@ -313,13 +330,27 @@ typedef union odp_pktin_config_opt_t {
  * Packet output configuration options listed in a bit field structure. Packet
  * output checksum insertion may be enabled or disabled. When it is enabled,
  * implementation will calculate and insert checksum into every outgoing packet
- * by default. Application may use a packet metadata flag to disable checksum
- * insertion per packet bases. For correct operation, packet metadata must
- * provide valid offsets for the appropriate protocols. For example, UDP
- * checksum calculation needs both L3 and L4 offsets (to access IP and UDP
- * headers). When application (e.g. a switch) does not modify L3/L4 data and
- * thus checksum does not need to be updated, output checksum insertion should
- * be disabled for optimal performance.
+ * by default. Application may disable checksum insertion (e.g.
+ * odp_packet_l4_chksum_insert()) on per packet basis. For correct operation,
+ * packet metadata must provide valid offsets for the appropriate protocols.
+ * For example, UDP checksum calculation needs both L3 and L4 offsets (to access
+ * IP and UDP headers). When application (e.g. a switch) does not modify L3/L4
+ * data and thus checksum does not need to be updated, output checksum insertion
+ * should be disabled for optimal performance.
+ *
+ * Packet flags (odp_packet_has_*()) are ignored for the purpose of checksum
+ * insertion in packet output.
+ *
+ * UDP, TCP and SCTP checksum insertion must not be requested for IP fragments.
+ * Use checksum override function (odp_packet_l4_chksum_insert()) to disable
+ * checksumming when sending a fragment through a packet IO interface that has
+ * the relevant L4 checksum insertion enabled.
+ *
+ * Result of checksum insertion at packet output is undefined if the protocol
+ * headers required for checksum calculation are not well formed. Packet must
+ * contain at least as many data bytes after L3/L4 offsets as the headers
+ * indicate. Other data bytes of the packet are ignored for the checksum
+ * insertion.
  */
 typedef union odp_pktout_config_opt_t {
 	/** Option flags */
@@ -407,6 +438,38 @@ typedef struct odp_pktio_config_t {
 	 * interface capability before enabling the same. */
 	odp_bool_t enable_loop;
 
+	/** Inbound IPSEC inlined with packet input
+	 *
+	 *  Enable/disable inline inbound IPSEC operation. When enabled packet
+	 *  input directs all IPSEC packets automatically to IPSEC inbound
+	 *  processing. IPSEC configuration is done through the IPSEC API.
+	 *  Packets that are not (recognized as) IPSEC are processed
+	 *  according to the packet input configuration.
+	 *
+	 *  0: Disable inbound IPSEC inline operation (default)
+	 *  1: Enable inbound IPSEC inline operation
+	 *
+	 *  @see odp_ipsec_config(), odp_ipsec_sa_create()
+	 */
+	odp_bool_t inbound_ipsec;
+
+	/** Outbound IPSEC inlined with packet output
+	 *
+	 *  Enable/disable inline outbound IPSEC operation. When enabled IPSEC
+	 *  outbound processing can send outgoing IPSEC packets directly
+	 *  to the pktio interface for output. IPSEC configuration is done
+	 *  through the IPSEC API.
+	 *
+	 *  Outbound IPSEC inline operation cannot be combined with traffic
+	 *  manager (ODP_PKTOUT_MODE_TM).
+	 *
+	 *  0: Disable outbound IPSEC inline operation (default)
+	 *  1: Enable outbound IPSEC inline operation
+	 *
+	 *  @see odp_ipsec_config(), odp_ipsec_sa_create()
+	 */
+	odp_bool_t outbound_ipsec;
+
 } odp_pktio_config_t;
 
 /**
@@ -419,6 +482,8 @@ typedef union odp_pktio_set_op_t {
 	struct {
 		/** Promiscuous mode */
 		uint32_t promisc_mode : 1;
+		/** MAC address  */
+		uint32_t mac_addr : 1;
 	} op;
 	/** All bits of the bit field structure.
 	  * This field can be used to set/clear all flags, or bitwise
@@ -445,11 +510,8 @@ typedef struct odp_pktio_capability_t {
 	 * set to zero. */
 	odp_pktio_set_op_t set_op;
 
-	/** Support of Loopback mode
-	 *
-	 * A boolean to denote whether loop back mode is supported on this
-	 * specific interface. */
-	odp_bool_t loop_supported;
+	/** @deprecated Use enable_loop inside odp_pktin_config_t */
+	odp_bool_t ODP_DEPRECATE(loop_supported);
 } odp_pktio_capability_t;
 
 /**
@@ -859,6 +921,11 @@ uint64_t odp_pktin_wait_time(uint64_t nsec);
  * is less than 'num', the remaining packets at the end of packets[] array
  * are not consumed, and the caller has to take care of them.
  *
+ * Entire packet data is sent out (odp_packet_len() bytes of data, starting from
+ * odp_packet_data()). All other packet metadata is ignored unless otherwise
+ * specified e.g. for protocol offload purposes. Link protocol specific frame
+ * checksum and padding are added to frames before transmission.
+ *
  * @param queue        Packet output queue handle for sending packets
  * @param packets[]    Array of packets to send
  * @param num          Number of packets to send
@@ -912,6 +979,22 @@ int odp_pktio_promisc_mode(odp_pktio_t pktio);
  * @retval <0 on failure
  */
 int odp_pktio_mac_addr(odp_pktio_t pktio, void *mac_addr, int size);
+
+/**
+ * Set the default MAC address of a packet IO interface.
+ *
+ * Support of this operation on a packet IO interface is reported
+ * through ‘mac_addr’ set operation capability.
+ *
+ * @param	pktio     Packet IO handle
+ * @param	mac_addr  MAC address to be set as default address
+ * @param	size      Size of the MAC address
+ *
+ * @return 0 on success
+ * @retval <0 on failure
+ */
+int odp_pktio_mac_addr_set(odp_pktio_t pktio, const void *mac_addr,
+			   int size);
 
 /**
  * Setup per-port default class-of-service.

@@ -7,6 +7,8 @@
 
 #include "config.h"
 
+#ifdef ODP_PKTIO_SOCKET
+
 #include <odp_posix_extensions.h>
 
 #include <sys/socket.h>
@@ -35,7 +37,6 @@
 #include <linux/sockios.h>
 
 #include <odp_api.h>
-#include <odp_packet_socket.h>
 #include <odp_packet_internal.h>
 #include <odp_packet_io_internal.h>
 #include <odp_align_internal.h>
@@ -44,6 +45,10 @@
 #include <odp_classification_inlines.h>
 #include <odp_classification_internal.h>
 #include <odp/api/hints.h>
+#include <odp_pktio_ops_socket.h>
+#include <pktio/common.h>
+#include <pktio/sysfs.h>
+#include <pktio/ethtool.h>
 
 #include <protocols/eth.h>
 #include <protocols/ip.h>
@@ -100,371 +105,26 @@ int sendmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags)
 #define ETHBUF_ALIGN(buf_ptr) ((uint8_t *)ODP_ALIGN_ROUNDUP_PTR((buf_ptr), \
 				sizeof(uint32_t)) + ETHBUF_OFFSET)
 
-/**
- * ODP_PACKET_SOCKET_MMSG:
- * ODP_PACKET_SOCKET_MMAP:
- * ODP_PACKET_NETMAP:
- */
-int mac_addr_get_fd(int fd, const char *name, unsigned char mac_dst[])
-{
-	struct ifreq ethreq;
-	int ret;
-
-	memset(&ethreq, 0, sizeof(ethreq));
-	snprintf(ethreq.ifr_name, IF_NAMESIZE, "%s", name);
-	ret = ioctl(fd, SIOCGIFHWADDR, &ethreq);
-	if (ret != 0) {
-		__odp_errno = errno;
-		ODP_ERR("ioctl(SIOCGIFHWADDR): %s: \"%s\".\n", strerror(errno),
-			ethreq.ifr_name);
-		return -1;
-	}
-
-	memcpy(mac_dst, (unsigned char *)ethreq.ifr_ifru.ifru_hwaddr.sa_data,
-	       ETH_ALEN);
-	return 0;
-}
-
-/*
- * ODP_PACKET_SOCKET_MMSG:
- * ODP_PACKET_SOCKET_MMAP:
- * ODP_PACKET_NETMAP:
- */
-uint32_t mtu_get_fd(int fd, const char *name)
-{
-	struct ifreq ifr;
-	int ret;
-
-	snprintf(ifr.ifr_name, IF_NAMESIZE, "%s", name);
-	ret = ioctl(fd, SIOCGIFMTU, &ifr);
-	if (ret < 0) {
-		__odp_errno = errno;
-		ODP_DBG("ioctl(SIOCGIFMTU): %s: \"%s\".\n", strerror(errno),
-			ifr.ifr_name);
-		return 0;
-	}
-	return ifr.ifr_mtu;
-}
-
-/*
- * ODP_PACKET_SOCKET_MMSG:
- * ODP_PACKET_SOCKET_MMAP:
- * ODP_PACKET_NETMAP:
- */
-int promisc_mode_set_fd(int fd, const char *name, int enable)
-{
-	struct ifreq ifr;
-	int ret;
-
-	snprintf(ifr.ifr_name, IF_NAMESIZE, "%s", name);
-	ret = ioctl(fd, SIOCGIFFLAGS, &ifr);
-	if (ret < 0) {
-		__odp_errno = errno;
-		ODP_DBG("ioctl(SIOCGIFFLAGS): %s: \"%s\".\n", strerror(errno),
-			ifr.ifr_name);
-		return -1;
-	}
-
-	if (enable)
-		ifr.ifr_flags |= IFF_PROMISC;
-	else
-		ifr.ifr_flags &= ~(IFF_PROMISC);
-
-	ret = ioctl(fd, SIOCSIFFLAGS, &ifr);
-	if (ret < 0) {
-		__odp_errno = errno;
-		ODP_DBG("ioctl(SIOCSIFFLAGS): %s: \"%s\".\n", strerror(errno),
-			ifr.ifr_name);
-		return -1;
-	}
-	return 0;
-}
-
-/*
- * ODP_PACKET_SOCKET_MMSG:
- * ODP_PACKET_SOCKET_MMAP:
- * ODP_PACKET_NETMAP:
- */
-int promisc_mode_get_fd(int fd, const char *name)
-{
-	struct ifreq ifr;
-	int ret;
-
-	snprintf(ifr.ifr_name, IF_NAMESIZE, "%s", name);
-	ret = ioctl(fd, SIOCGIFFLAGS, &ifr);
-	if (ret < 0) {
-		__odp_errno = errno;
-		ODP_DBG("ioctl(SIOCGIFFLAGS): %s: \"%s\".\n", strerror(errno),
-			ifr.ifr_name);
-		return -1;
-	}
-
-	return !!(ifr.ifr_flags & IFF_PROMISC);
-}
-
-int link_status_fd(int fd, const char *name)
-{
-	struct ifreq ifr;
-	int ret;
-
-	snprintf(ifr.ifr_name, IF_NAMESIZE, "%s", name);
-	ret = ioctl(fd, SIOCGIFFLAGS, &ifr);
-	if (ret < 0) {
-		__odp_errno = errno;
-		ODP_DBG("ioctl(SIOCGIFFLAGS): %s: \"%s\".\n", strerror(errno),
-			ifr.ifr_name);
-		return -1;
-	}
-
-	return !!(ifr.ifr_flags & IFF_RUNNING);
-}
-
-/**
- * Get enabled hash options of a packet socket
- *
- * @param fd              Socket file descriptor
- * @param name            Interface name
- * @param flow_type       Packet flow type
- * @param options[out]    Enabled hash options
- *
- * @retval 0 on success
- * @retval <0 on failure
- */
-static inline int get_rss_hash_options(int fd, const char *name,
-				       uint32_t flow_type, uint64_t *options)
-{
-	struct ifreq ifr;
-	struct ethtool_rxnfc rsscmd;
-
-	memset(&ifr, 0, sizeof(ifr));
-	memset(&rsscmd, 0, sizeof(rsscmd));
-	*options = 0;
-
-	snprintf(ifr.ifr_name, IF_NAMESIZE, "%s", name);
-
-	rsscmd.cmd = ETHTOOL_GRXFH;
-	rsscmd.flow_type = flow_type;
-
-	ifr.ifr_data = (caddr_t)&rsscmd;
-
-	if (ioctl(fd, SIOCETHTOOL, &ifr) < 0)
-		return -1;
-
-	*options = rsscmd.data;
-	return 0;
-}
-
-int rss_conf_get_fd(int fd, const char *name,
-		    odp_pktin_hash_proto_t *hash_proto)
-{
-	uint64_t options;
-	int rss_enabled = 0;
-
-	memset(hash_proto, 0, sizeof(odp_pktin_hash_proto_t));
-
-	get_rss_hash_options(fd, name, IPV4_FLOW, &options);
-	if ((options & RXH_IP_SRC) && (options & RXH_IP_DST)) {
-		hash_proto->proto.ipv4 = 1;
-		rss_enabled++;
-	}
-	get_rss_hash_options(fd, name, TCP_V4_FLOW, &options);
-	if ((options & RXH_IP_SRC) && (options & RXH_IP_DST) &&
-	    (options & RXH_L4_B_0_1) && (options & RXH_L4_B_2_3)) {
-		hash_proto->proto.ipv4_tcp = 1;
-		rss_enabled++;
-	}
-	get_rss_hash_options(fd, name, UDP_V4_FLOW, &options);
-	if ((options & RXH_IP_SRC) && (options & RXH_IP_DST) &&
-	    (options & RXH_L4_B_0_1) && (options & RXH_L4_B_2_3)) {
-		hash_proto->proto.ipv4_udp = 1;
-		rss_enabled++;
-	}
-	get_rss_hash_options(fd, name, IPV6_FLOW, &options);
-	if ((options & RXH_IP_SRC) && (options & RXH_IP_DST)) {
-		hash_proto->proto.ipv6 = 1;
-		rss_enabled++;
-	}
-	get_rss_hash_options(fd, name, TCP_V6_FLOW, &options);
-	if ((options & RXH_IP_SRC) && (options & RXH_IP_DST) &&
-	    (options & RXH_L4_B_0_1) && (options & RXH_L4_B_2_3)) {
-		hash_proto->proto.ipv6_tcp = 1;
-		rss_enabled++;
-	}
-	get_rss_hash_options(fd, name, UDP_V6_FLOW, &options);
-	if ((options & RXH_IP_SRC) && (options & RXH_IP_DST) &&
-	    (options & RXH_L4_B_0_1) && (options & RXH_L4_B_2_3)) {
-		hash_proto->proto.ipv6_udp = 1;
-		rss_enabled++;
-	}
-	return rss_enabled;
-}
-
-/**
- * Set hash options of a packet socket
- *
- * @param fd              Socket file descriptor
- * @param name            Interface name
- * @param flow_type       Packet flow type
- * @param options         Hash options
- *
- * @retval 0 on success
- * @retval <0 on failure
- */
-static inline int set_rss_hash(int fd, const char *name,
-			       uint32_t flow_type, uint64_t options)
-{
-	struct ifreq ifr;
-	struct ethtool_rxnfc rsscmd;
-
-	memset(&rsscmd, 0, sizeof(rsscmd));
-
-	snprintf(ifr.ifr_name, IF_NAMESIZE, "%s", name);
-
-	rsscmd.cmd = ETHTOOL_SRXFH;
-	rsscmd.flow_type = flow_type;
-	rsscmd.data = options;
-
-	ifr.ifr_data = (caddr_t)&rsscmd;
-
-	if (ioctl(fd, SIOCETHTOOL, &ifr) < 0)
-		return -1;
-
-	return 0;
-}
-
-int rss_conf_set_fd(int fd, const char *name,
-		    const odp_pktin_hash_proto_t *hash_proto)
-{
-	uint64_t options;
-	odp_pktin_hash_proto_t cur_hash;
-
-	/* Compare to currently set hash protocols */
-	rss_conf_get_fd(fd, name, &cur_hash);
-
-	if (hash_proto->proto.ipv4_udp && !cur_hash.proto.ipv4_udp) {
-		options = RXH_IP_SRC | RXH_IP_DST | RXH_L4_B_0_1 | RXH_L4_B_2_3;
-		if (set_rss_hash(fd, name, UDP_V4_FLOW, options))
-			return -1;
-	}
-	if (hash_proto->proto.ipv4_tcp && !cur_hash.proto.ipv4_tcp) {
-		options = RXH_IP_SRC | RXH_IP_DST | RXH_L4_B_0_1 | RXH_L4_B_2_3;
-		if (set_rss_hash(fd, name, TCP_V4_FLOW, options))
-			return -1;
-	}
-	if (hash_proto->proto.ipv6_udp && !cur_hash.proto.ipv6_udp) {
-		options = RXH_IP_SRC | RXH_IP_DST | RXH_L4_B_0_1 | RXH_L4_B_2_3;
-		if (set_rss_hash(fd, name, UDP_V6_FLOW, options))
-			return -1;
-	}
-	if (hash_proto->proto.ipv6_tcp && !cur_hash.proto.ipv6_tcp) {
-		options = RXH_IP_SRC | RXH_IP_DST | RXH_L4_B_0_1 | RXH_L4_B_2_3;
-		if (set_rss_hash(fd, name, TCP_V6_FLOW, options))
-			return -1;
-	}
-	if (hash_proto->proto.ipv4 && !cur_hash.proto.ipv4) {
-		options = RXH_IP_SRC | RXH_IP_DST;
-		if (set_rss_hash(fd, name, IPV4_FLOW, options))
-			return -1;
-	}
-	if (hash_proto->proto.ipv6 && !cur_hash.proto.ipv6) {
-		options = RXH_IP_SRC | RXH_IP_DST;
-		if (set_rss_hash(fd, name, IPV6_FLOW, options))
-			return -1;
-	}
-	return 0;
-}
-
-int rss_conf_get_supported_fd(int fd, const char *name,
-			      odp_pktin_hash_proto_t *hash_proto)
-{
-	uint64_t options;
-	int rss_supported = 0;
-
-	memset(hash_proto, 0, sizeof(odp_pktin_hash_proto_t));
-
-	if (!get_rss_hash_options(fd, name, IPV4_FLOW, &options)) {
-		if (!set_rss_hash(fd, name, IPV4_FLOW, options)) {
-			hash_proto->proto.ipv4 = 1;
-			rss_supported++;
-		}
-	}
-	if (!get_rss_hash_options(fd, name, TCP_V4_FLOW, &options)) {
-		if (!set_rss_hash(fd, name, TCP_V4_FLOW, options)) {
-			hash_proto->proto.ipv4_tcp = 1;
-			rss_supported++;
-		}
-	}
-	if (!get_rss_hash_options(fd, name, UDP_V4_FLOW, &options)) {
-		if (!set_rss_hash(fd, name, UDP_V4_FLOW, options)) {
-			hash_proto->proto.ipv4_udp = 1;
-			rss_supported++;
-		}
-	}
-	if (!get_rss_hash_options(fd, name, IPV6_FLOW, &options)) {
-		if (!set_rss_hash(fd, name, IPV6_FLOW, options)) {
-			hash_proto->proto.ipv6 = 1;
-			rss_supported++;
-		}
-	}
-	if (!get_rss_hash_options(fd, name, TCP_V6_FLOW, &options)) {
-		if (!set_rss_hash(fd, name, TCP_V6_FLOW, options)) {
-			hash_proto->proto.ipv6_tcp = 1;
-			rss_supported++;
-		}
-	}
-	if (!get_rss_hash_options(fd, name, UDP_V6_FLOW, &options)) {
-		if (!set_rss_hash(fd, name, UDP_V6_FLOW, options)) {
-			hash_proto->proto.ipv6_udp = 1;
-			rss_supported++;
-		}
-	}
-	return rss_supported;
-}
-
-void rss_conf_print(const odp_pktin_hash_proto_t *hash_proto)
-{	int max_len = 512;
-	char str[max_len];
-	int len = 0;
-	int n = max_len - 1;
-
-	len += snprintf(&str[len], n - len, " rss conf\n");
-
-	if (hash_proto->proto.ipv4)
-		len += snprintf(&str[len], n - len,
-				"    IPV4\n");
-	if (hash_proto->proto.ipv4_tcp)
-		len += snprintf(&str[len], n - len,
-				"    IPV4 TCP\n");
-	if (hash_proto->proto.ipv4_udp)
-		len += snprintf(&str[len], n - len,
-				"    IPV4 UDP\n");
-	if (hash_proto->proto.ipv6)
-		len += snprintf(&str[len], n - len,
-				"    IPV6\n");
-	if (hash_proto->proto.ipv6_tcp)
-		len += snprintf(&str[len], n - len,
-				"    IPV6 TCP\n");
-	if (hash_proto->proto.ipv6_udp)
-		len += snprintf(&str[len], n - len,
-				"    IPV6 UDP\n");
-	str[len] = '\0';
-
-	ODP_PRINT("%s\n", str);
-}
-
 /*
  * ODP_PACKET_SOCKET_MMSG:
  */
 static int sock_close(pktio_entry_t *pktio_entry)
 {
-	pkt_sock_t *pkt_sock = &pktio_entry->s.pkt_sock;
+	int result = 0;
+	pktio_ops_socket_data_t *pkt_sock = pktio_entry->s.ops_data;
+
 	if (pkt_sock->sockfd != -1 && close(pkt_sock->sockfd) != 0) {
 		__odp_errno = errno;
 		ODP_ERR("close(sockfd): %s\n", strerror(errno));
-		return -1;
+		result = -1;
 	}
 
-	return 0;
+	if (ODP_OPS_DATA_FREE(pktio_entry->s.ops_data)) {
+		ODP_ERR("ops_data_free(socket) failed\n");
+		result = -1;
+	}
+
+	return result;
 }
 
 /*
@@ -479,17 +139,25 @@ static int sock_setup_pkt(pktio_entry_t *pktio_entry, const char *netdev,
 	struct ifreq ethreq;
 	struct sockaddr_ll sa_ll;
 	char shm_name[ODP_SHM_NAME_LEN];
-	pkt_sock_t *pkt_sock = &pktio_entry->s.pkt_sock;
+	pktio_ops_socket_data_t *pkt_sock = NULL;
 	odp_pktio_stats_t cur_stats;
+
+	if (pool == ODP_POOL_INVALID)
+		return -1;
+
+	pktio_entry->s.ops_data = ODP_OPS_DATA_ALLOC(sizeof(*pkt_sock));
+	if (odp_unlikely(pktio_entry->s.ops_data == NULL)) {
+		ODP_ERR("Failed to allocate pktio_ops_socket_data_t struct");
+		return -1;
+	}
+	pkt_sock = pktio_entry->s.ops_data;
 
 	/* Init pktio entry */
 	memset(pkt_sock, 0, sizeof(*pkt_sock));
 	/* set sockfd to -1, because a valid socked might be initialized to 0 */
 	pkt_sock->sockfd = -1;
-
-	if (pool == ODP_POOL_INVALID)
-		return -1;
 	pkt_sock->pool = pool;
+
 	snprintf(shm_name, ODP_SHM_NAME_LEN, "%s-%s", "pktio", netdev);
 	shm_name[ODP_SHM_NAME_LEN - 1] = '\0';
 
@@ -532,11 +200,11 @@ static int sock_setup_pkt(pktio_entry_t *pktio_entry, const char *netdev,
 		goto error;
 	}
 
-	err = ethtool_stats_get_fd(pktio_entry->s.pkt_sock.sockfd,
+	err = ethtool_stats_get_fd(pkt_sock->sockfd,
 				   pktio_entry->s.name,
 				   &cur_stats);
 	if (err != 0) {
-		err = sysfs_stats(pktio_entry, &cur_stats);
+		err = sysfs_netif_stats(pktio_entry->s.name, &cur_stats);
 		if (err != 0) {
 			pktio_entry->s.stats_type = STATS_UNSUPPORTED;
 			ODP_DBG("pktio: %s unsupported stats\n",
@@ -556,7 +224,6 @@ static int sock_setup_pkt(pktio_entry_t *pktio_entry, const char *netdev,
 
 error:
 	sock_close(pktio_entry);
-
 	return -1;
 }
 
@@ -603,7 +270,7 @@ static uint32_t _rx_pkt_to_iovec(odp_packet_t pkt,
 static int sock_mmsg_recv(pktio_entry_t *pktio_entry, int index ODP_UNUSED,
 			  odp_packet_t pkt_table[], int len)
 {
-	pkt_sock_t *pkt_sock = &pktio_entry->s.pkt_sock;
+	pktio_ops_socket_data_t *pkt_sock = pktio_entry->s.ops_data;
 	odp_pool_t pool = pkt_sock->pool;
 	odp_time_t ts_val;
 	odp_time_t *ts = NULL;
@@ -718,7 +385,7 @@ static uint32_t _tx_pkt_to_iovec(odp_packet_t pkt,
 static int sock_mmsg_send(pktio_entry_t *pktio_entry, int index ODP_UNUSED,
 			  const odp_packet_t pkt_table[], int len)
 {
-	pkt_sock_t *pkt_sock = &pktio_entry->s.pkt_sock;
+	pktio_ops_socket_data_t *pkt_sock = pktio_entry->s.ops_data;
 	struct mmsghdr msgvec[len];
 	struct iovec iovecs[len][MAX_SEGS];
 	int ret;
@@ -764,7 +431,9 @@ static int sock_mmsg_send(pktio_entry_t *pktio_entry, int index ODP_UNUSED,
  */
 static uint32_t sock_mtu_get(pktio_entry_t *pktio_entry)
 {
-	return pktio_entry->s.pkt_sock.mtu;
+	pktio_ops_socket_data_t *pkt_sock = pktio_entry->s.ops_data;
+
+	return pkt_sock->mtu;
 }
 
 /*
@@ -773,7 +442,9 @@ static uint32_t sock_mtu_get(pktio_entry_t *pktio_entry)
 static int sock_mac_addr_get(pktio_entry_t *pktio_entry,
 			     void *mac_addr)
 {
-	memcpy(mac_addr, pktio_entry->s.pkt_sock.if_mac, ETH_ALEN);
+	pktio_ops_socket_data_t *pkt_sock = pktio_entry->s.ops_data;
+
+	memcpy(mac_addr, pkt_sock->if_mac, ETH_ALEN);
 	return ETH_ALEN;
 }
 
@@ -783,7 +454,9 @@ static int sock_mac_addr_get(pktio_entry_t *pktio_entry,
 static int sock_promisc_mode_set(pktio_entry_t *pktio_entry,
 				 odp_bool_t enable)
 {
-	return promisc_mode_set_fd(pktio_entry->s.pkt_sock.sockfd,
+	pktio_ops_socket_data_t *pkt_sock = pktio_entry->s.ops_data;
+
+	return promisc_mode_set_fd(pkt_sock->sockfd,
 				   pktio_entry->s.name, enable);
 }
 
@@ -792,13 +465,17 @@ static int sock_promisc_mode_set(pktio_entry_t *pktio_entry,
  */
 static int sock_promisc_mode_get(pktio_entry_t *pktio_entry)
 {
-	return promisc_mode_get_fd(pktio_entry->s.pkt_sock.sockfd,
+	pktio_ops_socket_data_t *pkt_sock = pktio_entry->s.ops_data;
+
+	return promisc_mode_get_fd(pkt_sock->sockfd,
 				   pktio_entry->s.name);
 }
 
 static int sock_link_status(pktio_entry_t *pktio_entry)
 {
-	return link_status_fd(pktio_entry->s.pkt_sock.sockfd,
+	pktio_ops_socket_data_t *pkt_sock = pktio_entry->s.ops_data;
+
+	return link_status_fd(pkt_sock->sockfd,
 			      pktio_entry->s.name);
 }
 
@@ -820,26 +497,27 @@ static int sock_capability(pktio_entry_t *pktio_entry ODP_UNUSED,
 static int sock_stats(pktio_entry_t *pktio_entry,
 		      odp_pktio_stats_t *stats)
 {
+	pktio_ops_socket_data_t *pkt_sock = pktio_entry->s.ops_data;
+
 	if (pktio_entry->s.stats_type == STATS_UNSUPPORTED) {
 		memset(stats, 0, sizeof(*stats));
 		return 0;
 	}
 
-	return sock_stats_fd(pktio_entry,
-			     stats,
-			     pktio_entry->s.pkt_sock.sockfd);
+	return sock_stats_fd(pktio_entry, stats, pkt_sock->sockfd);
 }
 
 static int sock_stats_reset(pktio_entry_t *pktio_entry)
 {
+	pktio_ops_socket_data_t *pkt_sock = pktio_entry->s.ops_data;
+
 	if (pktio_entry->s.stats_type == STATS_UNSUPPORTED) {
 		memset(&pktio_entry->s.stats, 0,
 		       sizeof(odp_pktio_stats_t));
 		return 0;
 	}
 
-	return sock_stats_reset_fd(pktio_entry,
-				   pktio_entry->s.pkt_sock.sockfd);
+	return sock_stats_reset_fd(pktio_entry, pkt_sock->sockfd);
 }
 
 static int sock_init_global(void)
@@ -855,29 +533,47 @@ static int sock_init_global(void)
 	return 0;
 }
 
-const pktio_if_ops_t sock_mmsg_pktio_ops = {
-	.name = "socket",
-	.print = NULL,
-	.init_global = sock_init_global,
-	.init_local = NULL,
-	.term = NULL,
+static pktio_ops_module_t socket_pktio_ops = {
+	.base = {
+		.name = "socket",
+		.init_local = NULL,
+		.term_local = NULL,
+		.init_global = sock_init_global,
+		.term_global = NULL,
+	},
 	.open = sock_mmsg_open,
 	.close = sock_close,
 	.start = NULL,
 	.stop = NULL,
 	.stats = sock_stats,
 	.stats_reset = sock_stats_reset,
+	.pktin_ts_res = NULL,
+	.pktin_ts_from_ns = NULL,
 	.recv = sock_mmsg_recv,
 	.send = sock_mmsg_send,
 	.mtu_get = sock_mtu_get,
 	.promisc_mode_set = sock_promisc_mode_set,
 	.promisc_mode_get = sock_promisc_mode_get,
 	.mac_get = sock_mac_addr_get,
+	.mac_set = NULL,
 	.link_status = sock_link_status,
 	.capability = sock_capability,
-	.pktin_ts_res = NULL,
-	.pktin_ts_from_ns = NULL,
 	.config = NULL,
 	.input_queues_config = NULL,
 	.output_queues_config = NULL,
+	.print = NULL,
 };
+
+ODP_MODULE_CONSTRUCTOR(socket_pktio_ops)
+{
+	odp_module_constructor(&socket_pktio_ops);
+
+	odp_subsystem_register_module(pktio_ops, &socket_pktio_ops);
+}
+
+/* Temporary variable to enable link this module,
+ * will remove in Makefile scheme changes.
+ */
+int enable_link_socket_pktio_ops = 0;
+
+#endif /* ODP_PKTIO_SOCKET */

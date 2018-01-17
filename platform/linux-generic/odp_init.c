@@ -13,6 +13,8 @@
 #include <odp_internal.h>
 #include <odp_schedule_if.h>
 #include <string.h>
+#include <libconfig.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <linux/limits.h>
 #include <dirent.h>
@@ -23,7 +25,92 @@
 #include <sys/types.h>
 #include <pwd.h>
 
+/* the name of the ODP configuration file: */
+#define CONFIGURATION_FILE_ENV_NONE "none"
+#define CONFIGURATION_FILE "odp.conf"
+#define CONFIGURATION_FILE_USR ("." CONFIGURATION_FILE)
+#define CONFIGURATION_FILE_SYS (SYSCONFDIR "/" CONFIGURATION_FILE)
+
+/* the ODP configuration file name can also be oveerwritten by env. variable: */
+#define ODP_SYSCONFIG_FILE_ENV "ODP_SYSCONFIG_FILE"
+
 struct odp_global_data_s odp_global_data;
+
+/* read the odp configuration file
+ *
+ * the configuration file is read from:
+ * 1) Wherever env variable ODP_SYSCONFIG_FILE says (or "none")
+ * 2) ./odp.conf
+ * 3) the @sysconfig@/odp.conf
+ * (checked in reverse order overwritting each-other)
+ * So the environment variable setting supperseeds any other file.
+ * If the environment variable exists and set to the string "none"
+ * the configuration file reading is inibited (used to prevent
+ * test which do not need a file to read the user or system files)
+ */
+static int read_configfile(void)
+{
+	config_t *cf;
+	const char *config_filename;
+	char user_config_filename[PATH_MAX];
+	char *env_config_filename;
+
+	/* initialize and read the configuration file if any: */
+	cf = &odp_global_data.configuration;
+	config_init(cf);
+	config_filename = NULL;
+	/* check if the system config file can be reached :*/
+	if (access(CONFIGURATION_FILE_SYS, R_OK) != -1)
+		config_filename = CONFIGURATION_FILE_SYS;
+	/* check if the user config file can be reached (overwrite if so) :*/
+	strncpy(user_config_filename, getenv("HOME"), PATH_MAX);
+	if (user_config_filename[0]) {
+		strncat(user_config_filename, "/", PATH_MAX);
+		strncat(user_config_filename, CONFIGURATION_FILE_USR, PATH_MAX);
+		if ((access(user_config_filename, R_OK) != -1))
+			config_filename = user_config_filename;
+	}
+	/* check if other config file is specified via env (overwrite if so):*/
+	env_config_filename = getenv(ODP_SYSCONFIG_FILE_ENV);
+	if (env_config_filename) {
+		/* none means "read no file": */
+		if (!strcmp(env_config_filename, CONFIGURATION_FILE_ENV_NONE))
+			return 0;
+		if (access(env_config_filename, R_OK) != -1) {
+			config_filename = env_config_filename;
+		} else {
+			ODP_ERR("Cannot read ODP configurattion file %s "
+				"(set by env variable "
+				ODP_SYSCONFIG_FILE_ENV ")\n",
+				env_config_filename);
+			config_filename = NULL;
+			return -1;
+		}
+	}
+	if (config_filename) {
+		ODP_DBG("Reading configuration file: %s\n", config_filename);
+		if (!config_read_file(cf, config_filename)) {
+#if defined(LIBCONFIG_VER_MAJOR) && LIBCONFIG_VER_MAJOR >= 1 && \
+				    LIBCONFIG_VER_MINOR >= 4
+			ODP_ERR("%s:%d - %s\n",
+				config_error_file(cf),
+				config_error_line(cf),
+				config_error_text(cf));
+#else
+			ODP_ERR("config_read_file\n");
+#endif
+			config_destroy(cf);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+void odp_init_param_init(odp_init_t *param)
+{
+	memset(param, 0, sizeof(odp_init_t));
+}
 
 int odp_init_global(odp_instance_t *instance,
 		    const odp_init_t *params,
@@ -42,6 +129,9 @@ int odp_init_global(odp_instance_t *instance,
 		if (params->abort_fn != NULL)
 			odp_global_data.abort_fn = params->abort_fn;
 	}
+
+	if (read_configfile())
+		goto init_failed;
 
 	if (odp_cpumask_init_global(params)) {
 		ODP_ERR("ODP cpumask init failed.\n");
@@ -85,13 +175,13 @@ int odp_init_global(odp_instance_t *instance,
 	}
 	stage = POOL_INIT;
 
-	if (queue_fn->init_global()) {
+	if (odp_queue_init_global()) {
 		ODP_ERR("ODP queue init failed.\n");
 		goto init_failed;
 	}
 	stage = QUEUE_INIT;
 
-	if (sched_fn->init_global()) {
+	if (odp_schedule_init_global()) {
 		ODP_ERR("ODP schedule init failed.\n");
 		goto init_failed;
 	}
@@ -103,7 +193,7 @@ int odp_init_global(odp_instance_t *instance,
 	}
 	stage = PKTIO_INIT;
 
-	if (odp_timer_init_global()) {
+	if (odp_timer_init_global(params)) {
 		ODP_ERR("ODP timer init failed.\n");
 		goto init_failed;
 	}
@@ -131,6 +221,30 @@ int odp_init_global(odp_instance_t *instance,
 		ODP_ERR("ODP name table init failed\n");
 		goto init_failed;
 	}
+	stage = NAME_TABLE_INIT;
+
+	if (_odpdrv_driver_init_global()) {
+		ODP_ERR("ODP drivers init failed\n");
+		goto init_failed;
+	}
+	stage = DRIVER_INIT;
+
+	if (_odp_ipsec_events_init_global()) {
+		ODP_ERR("ODP IPsec events init failed.\n");
+		goto init_failed;
+	}
+	stage = IPSEC_EVENTS_INIT;
+
+	if (_odp_ipsec_sad_init_global()) {
+		ODP_ERR("ODP IPsec SAD init failed.\n");
+		goto init_failed;
+	}
+	stage = IPSEC_SAD_INIT;
+
+	if (_odp_modules_init_global()) {
+		ODP_ERR("ODP modules init failed\n");
+		goto init_failed;
+	}
 
 	*instance = (odp_instance_t)odp_global_data.main_pid;
 
@@ -156,6 +270,28 @@ int _odp_term_global(enum init_stage stage)
 
 	switch (stage) {
 	case ALL_INIT:
+	case MODULES_INIT:
+	case IPSEC_SAD_INIT:
+		if (_odp_ipsec_sad_term_global()) {
+			ODP_ERR("ODP IPsec SAD term failed.\n");
+			rc = -1;
+		}
+		/* Fall through */
+
+	case IPSEC_EVENTS_INIT:
+		if (_odp_ipsec_events_term_global()) {
+			ODP_ERR("ODP IPsec events term failed.\n");
+			rc = -1;
+		}
+		/* Fall through */
+
+	case DRIVER_INIT:
+		if (_odpdrv_driver_term_global()) {
+			ODP_ERR("driver term failed.\n");
+			rc = -1;
+		}
+		/* Fall through */
+
 	case NAME_TABLE_INIT:
 		if (_odp_int_name_tbl_term_global()) {
 			ODP_ERR("Name table term failed.\n");
@@ -199,14 +335,14 @@ int _odp_term_global(enum init_stage stage)
 		/* Fall through */
 
 	case SCHED_INIT:
-		if (sched_fn->term_global()) {
+		if (odp_schedule_term_global()) {
 			ODP_ERR("ODP schedule term failed.\n");
 			rc = -1;
 		}
 		/* Fall through */
 
 	case QUEUE_INIT:
-		if (queue_fn->term_global()) {
+		if (odp_queue_term_global()) {
 			ODP_ERR("ODP queue term failed.\n");
 			rc = -1;
 		}
@@ -301,17 +437,23 @@ int odp_init_local(odp_instance_t instance, odp_thread_type_t thr_type)
 	}
 	stage = POOL_INIT;
 
-	if (queue_fn->init_local()) {
+	if (odp_queue_init_local()) {
 		ODP_ERR("ODP queue local init failed.\n");
 		goto init_fail;
 	}
 	stage = QUEUE_INIT;
 
-	if (sched_fn->init_local()) {
+	if (odp_schedule_init_local()) {
 		ODP_ERR("ODP schedule local init failed.\n");
 		goto init_fail;
 	}
-	/* stage = SCHED_INIT; */
+	stage = SCHED_INIT;
+
+	if (_odpdrv_driver_init_local()) {
+		ODP_ERR("ODP driver local init failed.\n");
+		goto init_fail;
+	}
+	/* stage = DRIVER_INIT; */
 
 	return 0;
 
@@ -334,14 +476,14 @@ int _odp_term_local(enum init_stage stage)
 	case ALL_INIT:
 
 	case SCHED_INIT:
-		if (sched_fn->term_local()) {
+		if (odp_schedule_term_local()) {
 			ODP_ERR("ODP schedule local term failed.\n");
 			rc = -1;
 		}
 		/* Fall through */
 
 	case QUEUE_INIT:
-		if (queue_fn->term_local()) {
+		if (odp_queue_term_local()) {
 			ODP_ERR("ODP queue local term failed.\n");
 			rc = -1;
 		}

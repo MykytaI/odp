@@ -14,18 +14,20 @@
 #include <odp/api/packet.h>
 
 #include <odp_packet_io_internal.h>
-#include <odp_packet_netmap.h>
-#include <odp_packet_socket.h>
 #include <odp_debug_internal.h>
 #include <protocols/eth.h>
 
 #include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include <poll.h>
 #include <linux/ethtool.h>
 #include <linux/sockios.h>
 #include <odp_classification_datamodel.h>
 #include <odp_classification_inlines.h>
 #include <odp_classification_internal.h>
+#include <odp_pktio_ops_netmap.h>
+#include <pktio/ethtool.h>
+#include <pktio/common.h>
 
 #include <inttypes.h>
 
@@ -48,15 +50,15 @@ static int netmap_stats_reset(pktio_entry_t *pktio_entry);
 static int netmap_do_ioctl(pktio_entry_t *pktio_entry, unsigned long cmd,
 			   int subcmd)
 {
-	pkt_netmap_t *pkt_nm = &pktio_entry->s.pkt_nm;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
 	struct ethtool_value eval;
 	struct ifreq ifr;
 	int err;
 	int fd = pkt_nm->sockfd;
 
 	memset(&ifr, 0, sizeof(ifr));
-	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s",
-		 pktio_entry->s.pkt_nm.if_name);
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name),
+		 "%s", pkt_nm->if_name);
 
 	switch (cmd) {
 	case SIOCSIFFLAGS:
@@ -135,7 +137,7 @@ static inline void map_netmap_rings(netmap_ring_t *rings,
 static int netmap_input_queues_config(pktio_entry_t *pktio_entry,
 				      const odp_pktin_queue_param_t *p)
 {
-	pkt_netmap_t *pkt_nm = &pktio_entry->s.pkt_nm;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
 	odp_pktin_mode_t mode = pktio_entry->s.param.in_mode;
 	unsigned num_queues = p->num_queues;
 	odp_bool_t lockless;
@@ -148,8 +150,7 @@ static int netmap_input_queues_config(pktio_entry_t *pktio_entry,
 		lockless = (p->op_mode == ODP_PKTIO_OP_MT_UNSAFE);
 
 	if (p->hash_enable && num_queues > 1) {
-		if (rss_conf_set_fd(pktio_entry->s.pkt_nm.sockfd,
-				    pktio_entry->s.pkt_nm.if_name,
+		if (rss_conf_set_fd(pkt_nm->sockfd, pkt_nm->if_name,
 				    &p->hash_proto)) {
 			ODP_ERR("Failed to configure input hash\n");
 			return -1;
@@ -164,7 +165,7 @@ static int netmap_input_queues_config(pktio_entry_t *pktio_entry,
 static int netmap_output_queues_config(pktio_entry_t *pktio_entry,
 				       const odp_pktout_queue_param_t *p)
 {
-	pkt_netmap_t *pkt_nm = &pktio_entry->s.pkt_nm;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
 
 	pkt_nm->lockless_tx = (p->op_mode == ODP_PKTIO_OP_MT_UNSAFE);
 
@@ -181,7 +182,7 @@ static int netmap_output_queues_config(pktio_entry_t *pktio_entry,
 static inline void netmap_close_descriptors(pktio_entry_t *pktio_entry)
 {
 	int i, j;
-	pkt_netmap_t *pkt_nm = &pktio_entry->s.pkt_nm;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
 
 	for (i = 0; i < PKTIO_MAX_QUEUES; i++) {
 		for (j = 0; j < NM_MAX_DESC; j++) {
@@ -204,25 +205,35 @@ static inline void netmap_close_descriptors(pktio_entry_t *pktio_entry)
 
 static int netmap_close(pktio_entry_t *pktio_entry)
 {
-	pkt_netmap_t *pkt_nm = &pktio_entry->s.pkt_nm;
+	int status = 0;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
 
 	netmap_close_descriptors(pktio_entry);
 
 	if (pkt_nm->sockfd != -1 && close(pkt_nm->sockfd) != 0) {
 		__odp_errno = errno;
 		ODP_ERR("close(sockfd): %s\n", strerror(errno));
-		return -1;
+
+		status = -1;
 	}
-	return 0;
+
+	if (ODP_OPS_DATA_FREE(pktio_entry->s.ops_data)) {
+		ODP_ERR("ops_data_free(netmap) failed\n");
+
+		status = -1;
+	}
+
+	return status;
 }
 
 static int netmap_link_status(pktio_entry_t *pktio_entry)
 {
-	if (pktio_entry->s.pkt_nm.is_virtual)
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
+
+	if (pkt_nm->is_virtual)
 		return 1;
 
-	return link_status_fd(pktio_entry->s.pkt_nm.sockfd,
-			      pktio_entry->s.pkt_nm.if_name);
+	return link_status_fd(pkt_nm->sockfd, pkt_nm->if_name);
 }
 
 /**
@@ -238,6 +249,7 @@ static inline int netmap_wait_for_link(pktio_entry_t *pktio_entry)
 {
 	int i;
 	int ret;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
 
 	/* Wait for the link to come up */
 	for (i = 0; i <= NM_WAIT_TIMEOUT; i++) {
@@ -249,12 +261,12 @@ static inline int netmap_wait_for_link(pktio_entry_t *pktio_entry)
 		 * until the opposing end's interface comes back up again. In
 		 * this case without the additional sleep pktio validation
 		 * tests fail. */
-		if (!pktio_entry->s.pkt_nm.is_virtual)
+		if (!pkt_nm->is_virtual)
 			sleep(1);
 		if (ret == 1)
 			return 1;
 	}
-	ODP_DBG("%s link is down\n", pktio_entry->s.pkt_nm.if_name);
+	ODP_DBG("%s link is down\n", pkt_nm->if_name);
 	return 0;
 }
 
@@ -265,7 +277,7 @@ static inline int netmap_wait_for_link(pktio_entry_t *pktio_entry)
  */
 static void netmap_init_capability(pktio_entry_t *pktio_entry)
 {
-	pkt_netmap_t *pkt_nm = &pktio_entry->s.pkt_nm;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
 	odp_pktio_capability_t *capa = &pkt_nm->capa;
 
 	memset(&pkt_nm->capa, 0, sizeof(odp_pktio_capability_t));
@@ -332,7 +344,7 @@ static int netmap_open(odp_pktio_t id ODP_UNUSED, pktio_entry_t *pktio_entry,
 	const char *prefix;
 	uint32_t mtu;
 	uint32_t buf_size;
-	pkt_netmap_t *pkt_nm = &pktio_entry->s.pkt_nm;
+	pktio_ops_netmap_data_t *pkt_nm = NULL;
 	struct nm_desc *desc;
 	struct netmap_ring *ring;
 	odp_pktin_hash_proto_t hash_proto;
@@ -344,13 +356,20 @@ static int netmap_open(odp_pktio_t id ODP_UNUSED, pktio_entry_t *pktio_entry,
 	if (pool == ODP_POOL_INVALID)
 		return -1;
 
+	pktio_entry->s.ops_data = ODP_OPS_DATA_ALLOC(sizeof(*pkt_nm));
+	if (odp_unlikely(pktio_entry->s.ops_data == NULL)) {
+		ODP_ERR("Failed to allocate pktio_ops_netmap_data_t struct");
+		return -1;
+	}
+	pkt_nm = pktio_entry->s.ops_data;
+
 	/* Init pktio entry */
 	memset(pkt_nm, 0, sizeof(*pkt_nm));
 	pkt_nm->sockfd = -1;
 	pkt_nm->pool = pool;
 
 	/* max frame len taking into account the l2-offset */
-	pkt_nm->max_frame_len = CONFIG_PACKET_MAX_SEG_LEN;
+	pkt_nm->max_frame_len = pool_entry_from_hdl(pool)->max_len;
 
 	/* allow interface to be opened with or without the 'netmap:' prefix */
 	prefix = "netmap:";
@@ -388,6 +407,11 @@ static int netmap_open(odp_pktio_t id ODP_UNUSED, pktio_entry_t *pktio_entry,
 
 	if (pkt_nm->is_virtual) {
 		static unsigned mac;
+		uint32_t tid = syscall(SYS_gettid);
+
+		if ((int)tid == -1)
+			ODP_DBG("Unable to fetch thread ID. VALE port MAC "
+				"addresses may not be unique.\n");
 
 		pkt_nm->capa.max_input_queues = 1;
 		pkt_nm->capa.set_op.op.promisc_mode = 0;
@@ -395,6 +419,10 @@ static int netmap_open(odp_pktio_t id ODP_UNUSED, pktio_entry_t *pktio_entry,
 		pktio_entry->s.stats_type = STATS_UNSUPPORTED;
 		/* Set MAC address for virtual interface */
 		pkt_nm->if_mac[0] = 0x2;
+		pkt_nm->if_mac[1] = (tid >> 24) & 0xff;
+		pkt_nm->if_mac[2] = (tid >> 16) & 0xff;
+		pkt_nm->if_mac[3] = (tid >> 8) & 0xff;
+		pkt_nm->if_mac[4] = tid & 0xff;
 		pkt_nm->if_mac[5] = ++mac;
 
 		return 0;
@@ -409,7 +437,7 @@ static int netmap_open(odp_pktio_t id ODP_UNUSED, pktio_entry_t *pktio_entry,
 
 	/* Use either interface MTU (+ ethernet header length) or netmap buffer
 	 * size as MTU, whichever is smaller. */
-	mtu = mtu_get_fd(pktio_entry->s.pkt_nm.sockfd, pkt_nm->if_name);
+	mtu = mtu_get_fd(pkt_nm->sockfd, pkt_nm->if_name);
 	if (mtu == 0) {
 		ODP_ERR("Unable to read interface MTU\n");
 		goto error;
@@ -434,7 +462,7 @@ static int netmap_open(odp_pktio_t id ODP_UNUSED, pktio_entry_t *pktio_entry,
 		goto error;
 
 	/* netmap uses only ethtool to get statistics counters */
-	err = ethtool_stats_get_fd(pktio_entry->s.pkt_nm.sockfd,
+	err = ethtool_stats_get_fd(pkt_nm->sockfd,
 				   pkt_nm->if_name, &cur_stats);
 	if (err) {
 		ODP_ERR("netmap pktio %s does not support statistics counters\n",
@@ -455,7 +483,7 @@ error:
 
 static int netmap_start(pktio_entry_t *pktio_entry)
 {
-	pkt_netmap_t *pkt_nm = &pktio_entry->s.pkt_nm;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
 	netmap_ring_t *desc_ring;
 	struct nm_desc *desc_ptr;
 	unsigned i;
@@ -611,8 +639,9 @@ static inline int netmap_pkt_to_odp(pktio_entry_t *pktio_entry,
 				    netmap_slot_t slot_tbl[], int16_t slot_num,
 				    odp_time_t *ts)
 {
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
 	odp_packet_t pkt;
-	odp_pool_t pool = pktio_entry->s.pkt_nm.pool;
+	odp_pool_t pool = pkt_nm->pool;
 	odp_packet_hdr_t *pkt_hdr;
 	odp_packet_hdr_t parsed_hdr;
 	int i;
@@ -620,7 +649,7 @@ static inline int netmap_pkt_to_odp(pktio_entry_t *pktio_entry,
 	int alloc_len;
 
 	/* Allocate maximum sized packets */
-	alloc_len = pktio_entry->s.pkt_nm.mtu;
+	alloc_len = pkt_nm->mtu;
 
 	num = packet_alloc_multi(pool, alloc_len, pkt_tbl, slot_num);
 
@@ -633,14 +662,9 @@ static inline int netmap_pkt_to_odp(pktio_entry_t *pktio_entry,
 
 		odp_prefetch(slot.buf);
 
-		if (odp_unlikely(len > pktio_entry->s.pkt_nm.max_frame_len)) {
+		if (odp_unlikely(len > pkt_nm->max_frame_len)) {
 			ODP_ERR("RX: frame too big %" PRIu16 " %zu!\n", len,
-				pktio_entry->s.pkt_nm.max_frame_len);
-			goto fail;
-		}
-
-		if (odp_unlikely(len < _ODP_ETH_LEN_MIN)) {
-			ODP_ERR("RX: Frame truncated: %" PRIu16 "\n", len);
+				pkt_nm->max_frame_len);
 			goto fail;
 		}
 
@@ -731,7 +755,7 @@ static int netmap_recv(pktio_entry_t *pktio_entry, int index,
 		       odp_packet_t pkt_table[], int num)
 {
 	struct nm_desc *desc;
-	pkt_netmap_t *pkt_nm = &pktio_entry->s.pkt_nm;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
 	unsigned first_desc_id = pkt_nm->rx_desc_ring[index].s.first;
 	unsigned last_desc_id = pkt_nm->rx_desc_ring[index].s.last;
 	unsigned desc_id;
@@ -784,7 +808,7 @@ static int netmap_recv(pktio_entry_t *pktio_entry, int index,
 static int netmap_send(pktio_entry_t *pktio_entry, int index,
 		       const odp_packet_t pkt_table[], int num)
 {
-	pkt_netmap_t *pkt_nm = &pktio_entry->s.pkt_nm;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
 	struct pollfd polld;
 	struct nm_desc *desc;
 	struct netmap_ring *ring;
@@ -859,74 +883,84 @@ static int netmap_send(pktio_entry_t *pktio_entry, int index,
 
 static int netmap_mac_addr_get(pktio_entry_t *pktio_entry, void *mac_addr)
 {
-	memcpy(mac_addr, pktio_entry->s.pkt_nm.if_mac, ETH_ALEN);
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
+
+	memcpy(mac_addr, pkt_nm->if_mac, ETH_ALEN);
 	return ETH_ALEN;
 }
 
 static uint32_t netmap_mtu_get(pktio_entry_t *pktio_entry)
 {
-	return pktio_entry->s.pkt_nm.mtu;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
+
+	return pkt_nm->mtu;
 }
 
 static int netmap_promisc_mode_set(pktio_entry_t *pktio_entry,
 				   odp_bool_t enable)
 {
-	if (pktio_entry->s.pkt_nm.is_virtual) {
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
+
+	if (pkt_nm->is_virtual) {
 		__odp_errno = ENOTSUP;
 		return -1;
 	}
 
-	return promisc_mode_set_fd(pktio_entry->s.pkt_nm.sockfd,
-				   pktio_entry->s.pkt_nm.if_name, enable);
+	return promisc_mode_set_fd(pkt_nm->sockfd, pkt_nm->if_name, enable);
 }
 
 static int netmap_promisc_mode_get(pktio_entry_t *pktio_entry)
 {
-	if (pktio_entry->s.pkt_nm.is_virtual)
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
+
+	if (pkt_nm->is_virtual)
 		return 0;
 
-	return promisc_mode_get_fd(pktio_entry->s.pkt_nm.sockfd,
-				   pktio_entry->s.pkt_nm.if_name);
+	return promisc_mode_get_fd(pkt_nm->sockfd, pkt_nm->if_name);
 }
 
 static int netmap_capability(pktio_entry_t *pktio_entry,
 			     odp_pktio_capability_t *capa)
 {
-	*capa = pktio_entry->s.pkt_nm.capa;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
+
+	*capa = pkt_nm->capa;
 	return 0;
 }
 
 static int netmap_stats(pktio_entry_t *pktio_entry,
 			odp_pktio_stats_t *stats)
 {
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
+
 	if (pktio_entry->s.stats_type == STATS_UNSUPPORTED) {
 		memset(stats, 0, sizeof(*stats));
 		return 0;
 	}
 
 	return sock_stats_fd(pktio_entry,
-			     stats,
-			     pktio_entry->s.pkt_nm.sockfd);
+			     stats, pkt_nm->sockfd);
 }
 
 static int netmap_stats_reset(pktio_entry_t *pktio_entry)
 {
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
+
 	if (pktio_entry->s.stats_type == STATS_UNSUPPORTED) {
 		memset(&pktio_entry->s.stats, 0,
 		       sizeof(odp_pktio_stats_t));
 		return 0;
 	}
 
-	return sock_stats_reset_fd(pktio_entry,
-				   pktio_entry->s.pkt_nm.sockfd);
+	return sock_stats_reset_fd(pktio_entry, pkt_nm->sockfd);
 }
 
 static void netmap_print(pktio_entry_t *pktio_entry)
 {
 	odp_pktin_hash_proto_t hash_proto;
+	pktio_ops_netmap_data_t *pkt_nm = pktio_entry->s.ops_data;
 
-	if (rss_conf_get_fd(pktio_entry->s.pkt_nm.sockfd,
-			    pktio_entry->s.pkt_nm.if_name, &hash_proto))
+	if (rss_conf_get_fd(pkt_nm->sockfd, pkt_nm->if_name, &hash_proto))
 		rss_conf_print(&hash_proto);
 }
 
@@ -945,31 +979,47 @@ static int netmap_init_global(void)
 	return 0;
 }
 
-const pktio_if_ops_t netmap_pktio_ops = {
-	.name = "netmap",
-	.print = netmap_print,
-	.init_global = netmap_init_global,
-	.init_local = NULL,
-	.term = NULL,
+static pktio_ops_module_t netmap_pktio_ops = {
+	.base = {
+		.name = "netmap",
+		.init_local = NULL,
+		.term_local = NULL,
+		.init_global = netmap_init_global,
+		.term_global = NULL,
+	},
 	.open = netmap_open,
 	.close = netmap_close,
 	.start = netmap_start,
 	.stop = netmap_stop,
-	.link_status = netmap_link_status,
 	.stats = netmap_stats,
 	.stats_reset = netmap_stats_reset,
+	.pktin_ts_res = NULL,
+	.pktin_ts_from_ns = NULL,
+	.recv = netmap_recv,
+	.send = netmap_send,
 	.mtu_get = netmap_mtu_get,
 	.promisc_mode_set = netmap_promisc_mode_set,
 	.promisc_mode_get = netmap_promisc_mode_get,
 	.mac_get = netmap_mac_addr_get,
+	.mac_set = NULL,
+	.link_status = netmap_link_status,
 	.capability = netmap_capability,
-	.pktin_ts_res = NULL,
-	.pktin_ts_from_ns = NULL,
 	.config = NULL,
 	.input_queues_config = netmap_input_queues_config,
 	.output_queues_config = netmap_output_queues_config,
-	.recv = netmap_recv,
-	.send = netmap_send
+	.print = netmap_print,
 };
+
+ODP_MODULE_CONSTRUCTOR(netmap_pktio_ops)
+{
+	odp_module_constructor(&netmap_pktio_ops);
+
+	odp_subsystem_register_module(pktio_ops, &netmap_pktio_ops);
+}
+
+/* Temporary variable to enable link this module,
+ * will remove in Makefile scheme changes.
+ */
+int enable_link_netmap_pktio_ops = 0;
 
 #endif /* ODP_NETMAP */

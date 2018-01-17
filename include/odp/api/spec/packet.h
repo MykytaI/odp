@@ -83,6 +83,22 @@ typedef struct odp_packet_data_range {
 
 } odp_packet_data_range_t;
 
+/**
+ * Checksum check status in packet
+ */
+typedef enum odp_packet_chksum_status_t {
+	/** Checksum was not checked. Checksum check was not attempted or
+	  * the attempt failed. */
+	ODP_PACKET_CHKSUM_UNKNOWN = 0,
+
+	/** Checksum was checked and it was not correct */
+	ODP_PACKET_CHKSUM_BAD,
+
+	/** Checksum was checked and it was correct */
+	ODP_PACKET_CHKSUM_OK
+
+} odp_packet_chksum_status_t;
+
 /*
  *
  * Alloc and free
@@ -904,7 +920,7 @@ odp_packet_t odp_packet_ref_static(odp_packet_t pkt);
  * dynamic references must not be mixed. Results are undefined if these
  * restrictions are not observed.
  *
- * The packet handle 'pkt' may itself by a (dynamic) reference to a packet.
+ * The packet handle 'pkt' may itself be a (dynamic) reference to a packet.
  *
  * If the caller does not intend to modify either the packet or the new
  * reference to it, odp_packet_ref_static() may be used to create
@@ -931,7 +947,7 @@ odp_packet_t odp_packet_ref(odp_packet_t pkt, uint32_t offset);
  * packet consists metadata and data of the 'hdr' packet, followed by the
  * shared part of packet 'pkt'.
  *
- * The packet handle ('pkt') may itself by a (dynamic) reference to a packet,
+ * The packet handle ('pkt') may itself be a (dynamic) reference to a packet,
  * but the header packet handle ('hdr') must be unique. Both packets must be
  * have been allocated from the same pool and the handles must not refer to
  * the same packet. Results are undefined if these restrictions are not
@@ -954,25 +970,6 @@ odp_packet_t odp_packet_ref(odp_packet_t pkt, uint32_t offset);
  */
 odp_packet_t odp_packet_ref_pkt(odp_packet_t pkt, uint32_t offset,
 				odp_packet_t hdr);
-
-/**
- * Packet unshared data length
- *
- * When a packet has multiple references, packet data is divided into two
- * parts: unshared and shared. The unshared part always precedes the shared
- * part. This call returns number of bytes in the unshared part.  When a
- * packet has only a single reference (see odp_packet_has_ref()), all packet
- * data is unshared and unshared length equals the packet length
- * (odp_packet_len()).
- *
- * Application may modify only the unshared part, the rest of the packet data
- * must be treated as read only.
- *
- * @param pkt  Packet handle
- *
- * @return Packet unshared data length
- */
-uint32_t odp_packet_unshared_len(odp_packet_t pkt);
 
 /**
  * Test if packet has multiple references
@@ -1378,6 +1375,68 @@ uint32_t odp_packet_l4_offset(odp_packet_t pkt);
 int odp_packet_l4_offset_set(odp_packet_t pkt, uint32_t offset);
 
 /**
+ * Layer 3 checksum check status
+ *
+ * Returns the result of the latest layer 3 checksum check done for the packet.
+ * The status tells if checksum check was attempted and the result of the
+ * attempt. It depends on packet input (or IPSEC) configuration, packet content
+ * and implementation capabilities if checksum check is attempted for a packet.
+ *
+ * @param pkt     Packet handle
+ *
+ * @return L3 checksum check status
+ */
+odp_packet_chksum_status_t odp_packet_l3_chksum_status(odp_packet_t pkt);
+
+/**
+ * Layer 4 checksum check status
+ *
+ * Returns the result of the latest layer 4 checksum check done for the packet.
+ * The status tells if checksum check was attempted and the result of the
+ * attempt. It depends on packet input (or IPSEC) configuration, packet content
+ * and implementation capabilities if checksum check is attempted for a packet.
+ *
+ * @param pkt     Packet handle
+ *
+ * @return L4 checksum check status
+ */
+odp_packet_chksum_status_t odp_packet_l4_chksum_status(odp_packet_t pkt);
+
+/**
+ * Layer 3 checksum insertion override
+ *
+ * Override checksum insertion configuration per packet. This per packet setting
+ * overrides a higher level configuration for checksum insertion into a L3
+ * header during packet output processing.
+ *
+ * Calling this function is always allowed but the checksum will not be
+ * inserted if the packet is output through a pktio that does not have
+ * the relevant pktout chksum bit set in the pktio capability.
+ *
+ * @param pkt     Packet handle
+ * @param insert  0: do not insert L3 checksum
+ *                1: insert L3 checksum
+ */
+void odp_packet_l3_chksum_insert(odp_packet_t pkt, int insert);
+
+/**
+ * Layer 4 checksum insertion override
+ *
+ * Override checksum insertion configuration per packet. This per packet setting
+ * overrides a higher level configuration for checksum insertion into a L4
+ * header during packet output processing.
+ *
+ * Calling this function is always allowed but the checksum will not be
+ * inserted if the packet is output through a pktio that does not have
+ * the relevant pktout chksum bit set in the pktio capability.
+ *
+ * @param pkt     Packet handle
+ * @param insert  0: do not insert L4 checksum
+ *                1: insert L4 checksum
+ */
+void odp_packet_l4_chksum_insert(odp_packet_t pkt, int insert);
+
+/**
  * Packet flow hash value
  *
  * Returns the hash generated from the packet header. Use
@@ -1502,13 +1561,26 @@ void odp_packet_shaper_len_adjust_set(odp_packet_t pkt, int8_t adj);
  */
 
 /**
- * Print packet to the console
+ * Print packet debug information
  *
- * Print all packet debug information to the console.
+ * Print all packet debug information to the ODP log.
  *
  * @param pkt  Packet handle
  */
 void odp_packet_print(odp_packet_t pkt);
+
+/**
+ * Print packet data
+ *
+ * Print packet debug information with packet data to the ODP log. Operation
+ * prints 'len' bytes of packet data starting from 'offset' byte. Offset plus
+ * length must not exceed packet length (odp_packet_len()).
+ *
+ * @param pkt     Packet handle
+ * @param offset  Byte offset into the packet
+ * @param len     Number of bytes to print
+ */
+void odp_packet_print_data(odp_packet_t pkt, uint32_t offset, uint32_t len);
 
 /**
  * Perform full packet validity check

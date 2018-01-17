@@ -1,9 +1,11 @@
+TESTS_ENVIRONMENT = EXEEXT=${EXEEXT}
+
 LIB   = $(top_builddir)/lib
 
 #in the following line, the libs using the symbols should come before
 #the libs containing them! The includer is given a chance to add things
 #before libodp by setting PRE_LDADD before the inclusion.
-LDADD = $(PRE_LDADD) $(LIB)/libodphelper.la $(LIB)/libodp-linux.la
+LDADD = $(PRE_LDADD) $(LIB)/libodphelper.la $(LIB)/lib$(ODP_LIB_STR).la $(DPDK_PMDS)
 
 INCFLAGS = \
 	-I$(top_builddir)/platform/@with_platform@/include \
@@ -20,19 +22,21 @@ ODP_PLATFORM=${with_platform}
 AM_CPPFLAGS = $(INCFLAGS)
 AM_LDFLAGS = -static
 
-EXECUTABLES = chksum$(EXEEXT) \
-              cuckootable$(EXEEXT) \
-              parse$(EXEEXT)\
-              table$(EXEEXT) \
-              iplookuptable$(EXEEXT)
+EXECUTABLES = chksum \
+              cuckootable \
+              parse\
+              table \
+              iplookuptable
 
 #These are platform specific extensions that are not portable
 #They are a convenience to app writers who have chosen to
 #restrict their application to Linux.
 
 if helper_linux
-EXECUTABLES += linux/pthread$(EXEEXT) \
-	       linux/process$(EXEEXT)
+EXECUTABLES += linux/pthread \
+	       linux/process
+linux_pthread_SOURCES = linux/pthread.c
+linux_process_SOURCES = linux/process.c
 endif
 
 COMPILE_ONLY = odpthreads

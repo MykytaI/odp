@@ -729,7 +729,8 @@ static uint64_t time_till_not_red(tm_shaper_params_t *shaper_params,
 		commit_delay = (-shaper_obj->commit_cnt)
 			/ shaper_params->commit_rate;
 
-	min_time_delay = MAX(shaper_obj->shaper_params->min_time_delta, 256);
+	min_time_delay =
+	    MAX(shaper_obj->shaper_params->min_time_delta, UINT64_C(256));
 	commit_delay = MAX(commit_delay, min_time_delay);
 	if (shaper_params->peak_rate == 0)
 		return commit_delay;
@@ -1668,7 +1669,7 @@ static odp_tm_percent_t tm_queue_fullness(tm_wred_params_t      *wred_params,
 		return 0;
 
 	fullness = (10000 * current_cnt) / max_cnt;
-	return (odp_tm_percent_t)MIN(fullness, 50000);
+	return (odp_tm_percent_t)MIN(fullness, UINT64_C(50000));
 }
 
 static odp_bool_t tm_local_random_drop(tm_system_t      *tm_system,
@@ -2499,7 +2500,7 @@ static void tm_system_capabilities_set(odp_tm_capabilities_t *cap_ptr,
 	memset(cap_ptr, 0, sizeof(odp_tm_capabilities_t));
 
 	max_queues       = MIN(req_ptr->max_tm_queues,
-			       ODP_TM_MAX_NUM_TM_NODES);
+			       (uint32_t)ODP_TM_MAX_NUM_TM_NODES);
 	shaper_supported = req_ptr->tm_queue_shaper_needed;
 	wred_supported   = req_ptr->tm_queue_wred_needed;
 	dual_slope       = req_ptr->tm_queue_dual_slope_needed;
@@ -2523,8 +2524,9 @@ static void tm_system_capabilities_set(odp_tm_capabilities_t *cap_ptr,
 		per_level_req = &req_ptr->per_level[level_idx];
 
 		max_nodes        = MIN(per_level_req->max_num_tm_nodes,
-				       ODP_TM_MAX_NUM_TM_NODES);
-		max_fanin        = MIN(per_level_req->max_fanin_per_node, 1024);
+				       (uint32_t)ODP_TM_MAX_NUM_TM_NODES);
+		max_fanin        = MIN(per_level_req->max_fanin_per_node,
+				       UINT32_C(1024));
 		max_priority     = MIN(per_level_req->max_priority,
 				       ODP_TM_MAX_PRIORITIES - 1);
 		min_weight       = MAX(per_level_req->min_weight,
@@ -4643,19 +4645,19 @@ void odp_tm_stats_print(odp_tm_t odp_tm)
 	tm_system = GET_TM_SYSTEM(odp_tm);
 	input_work_queue = tm_system->input_work_queue;
 
-	ODP_DBG("odp_tm_stats_print - tm_system=0x%" PRIX64 " tm_idx=%u\n",
-		odp_tm, tm_system->tm_idx);
-	ODP_DBG("  input_work_queue size=%u current cnt=%u peak cnt=%u\n",
-		INPUT_WORK_RING_SIZE, input_work_queue->queue_cnt,
-		input_work_queue->peak_cnt);
-	ODP_DBG("  input_work_queue enqueues=%" PRIu64 " dequeues=% " PRIu64
-		" fail_cnt=%" PRIu64 "\n", input_work_queue->total_enqueues,
-		input_work_queue->total_dequeues,
-		input_work_queue->enqueue_fail_cnt);
-	ODP_DBG("  green_cnt=%" PRIu64 " yellow_cnt=%" PRIu64 " red_cnt=%"
-		PRIu64 "\n", tm_system->shaper_green_cnt,
-		tm_system->shaper_yellow_cnt,
-		tm_system->shaper_red_cnt);
+	ODP_PRINT("odp_tm_stats_print - tm_system=0x%" PRIX64 " tm_idx=%u\n",
+		  odp_tm, tm_system->tm_idx);
+	ODP_PRINT("  input_work_queue size=%u current cnt=%u peak cnt=%u\n",
+		  INPUT_WORK_RING_SIZE, input_work_queue->queue_cnt,
+		  input_work_queue->peak_cnt);
+	ODP_PRINT("  input_work_queue enqueues=%" PRIu64 " dequeues=% " PRIu64
+		  " fail_cnt=%" PRIu64 "\n", input_work_queue->total_enqueues,
+		  input_work_queue->total_dequeues,
+		  input_work_queue->enqueue_fail_cnt);
+	ODP_PRINT("  green_cnt=%" PRIu64 " yellow_cnt=%" PRIu64 " red_cnt=%"
+		  PRIu64 "\n", tm_system->shaper_green_cnt,
+		  tm_system->shaper_yellow_cnt,
+		  tm_system->shaper_red_cnt);
 
 	_odp_pkt_queue_stats_print(tm_system->_odp_int_queue_pool);
 	_odp_timer_wheel_stats_print(tm_system->_odp_int_timer_wheel);
@@ -4665,14 +4667,14 @@ void odp_tm_stats_print(odp_tm_t odp_tm)
 	for (queue_num = 1; queue_num < max_queue_num; queue_num++) {
 		tm_queue_obj = tm_system->queue_num_tbl[queue_num - 1];
 		if (tm_queue_obj && tm_queue_obj->pkts_rcvd_cnt != 0)
-			ODP_DBG("queue_num=%u priority=%u rcvd=%u enqueued=%u "
-				"dequeued=%u consumed=%u\n",
-				queue_num,
-				tm_queue_obj->priority,
-				tm_queue_obj->pkts_rcvd_cnt,
-				tm_queue_obj->pkts_enqueued_cnt,
-				tm_queue_obj->pkts_dequeued_cnt,
-				tm_queue_obj->pkts_consumed_cnt);
+			ODP_PRINT("queue_num=%u priority=%u rcvd=%u enqueued=%u "
+				  "dequeued=%u consumed=%u\n",
+				  queue_num,
+				  tm_queue_obj->priority,
+				  tm_queue_obj->pkts_rcvd_cnt,
+				  tm_queue_obj->pkts_enqueued_cnt,
+				  tm_queue_obj->pkts_dequeued_cnt,
+				  tm_queue_obj->pkts_consumed_cnt);
 	}
 }
 

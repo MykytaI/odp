@@ -6,6 +6,8 @@
 
 #include "config.h"
 
+#ifdef ODP_PKTIO_TAP
+
 /**
  * @file
  *
@@ -42,10 +44,11 @@
 #include <linux/if_tun.h>
 
 #include <odp_api.h>
-#include <odp_packet_socket.h>
 #include <odp_packet_internal.h>
 #include <odp_packet_io_internal.h>
 #include <odp_classification_internal.h>
+#include <odp_pktio_ops_tap.h>
+#include <pktio/common.h>
 
 #define BUF_SIZE 65536
 
@@ -59,6 +62,29 @@ static int gen_random_mac(unsigned char *mac)
 	return 0;
 }
 
+static int mac_addr_set_fd(int fd, const char *name,
+			   const unsigned char mac_dst[])
+{
+	struct ifreq ethreq;
+	int ret;
+
+	memset(&ethreq, 0, sizeof(ethreq));
+	snprintf(ethreq.ifr_name, IF_NAMESIZE, "%s", name);
+
+	ethreq.ifr_hwaddr.sa_family = AF_UNIX;
+	memcpy(ethreq.ifr_hwaddr.sa_data, mac_dst, ETH_ALEN);
+
+	ret = ioctl(fd, SIOCSIFHWADDR, &ethreq);
+	if (ret != 0) {
+		__odp_errno = errno;
+		ODP_ERR("ioctl(SIOCSIFHWADDR): %s: \"%s\".\n", strerror(errno),
+			ethreq.ifr_name);
+		return -1;
+	}
+
+	return 0;
+}
+
 static int tap_pktio_open(odp_pktio_t id ODP_UNUSED,
 			  pktio_entry_t *pktio_entry,
 			  const char *devname, odp_pool_t pool)
@@ -66,23 +92,31 @@ static int tap_pktio_open(odp_pktio_t id ODP_UNUSED,
 	int fd, skfd, flags;
 	uint32_t mtu;
 	struct ifreq ifr;
-	pkt_tap_t *tap = &pktio_entry->s.pkt_tap;
+	pktio_ops_tap_data_t *tap = NULL;
 
 	if (strncmp(devname, "tap:", 4) != 0)
 		return -1;
+
+	if (pool == ODP_POOL_INVALID)
+		return -1;
+
+	pktio_entry->s.ops_data = ODP_OPS_DATA_ALLOC(sizeof(*tap));
+	if (odp_unlikely(pktio_entry->s.ops_data == NULL)) {
+		ODP_ERR("Failed to allocate pktio_ops_tap_data_t struct");
+		return -1;
+	}
+	tap = pktio_entry->s.ops_data;
 
 	/* Init pktio entry */
 	memset(tap, 0, sizeof(*tap));
 	tap->fd = -1;
 	tap->skfd = -1;
 
-	if (pool == ODP_POOL_INVALID)
-		return -1;
-
 	fd = open("/dev/net/tun", O_RDWR);
 	if (fd < 0) {
 		__odp_errno = errno;
 		ODP_ERR("failed to open /dev/net/tun: %s\n", strerror(errno));
+		ODP_OPS_DATA_FREE(pktio_entry->s.ops_data);
 		return -1;
 	}
 
@@ -134,22 +168,6 @@ static int tap_pktio_open(odp_pktio_t id ODP_UNUSED,
 		goto sock_err;
 	}
 
-	/* Up interface by default. */
-	if (ioctl(skfd, SIOCGIFFLAGS, &ifr) < 0) {
-		__odp_errno = errno;
-		ODP_ERR("ioctl(SIOCGIFFLAGS) failed: %s\n", strerror(errno));
-		goto sock_err;
-	}
-
-	ifr.ifr_flags |= IFF_UP;
-	ifr.ifr_flags |= IFF_RUNNING;
-
-	if (ioctl(skfd, SIOCSIFFLAGS, &ifr) < 0) {
-		__odp_errno = errno;
-		ODP_ERR("failed to come up: %s\n", strerror(errno));
-		goto sock_err;
-	}
-
 	tap->fd = fd;
 	tap->skfd = skfd;
 	tap->mtu = mtu;
@@ -160,13 +178,76 @@ sock_err:
 tap_err:
 	close(fd);
 	ODP_ERR("Tap device alloc failed.\n");
+	ODP_OPS_DATA_FREE(pktio_entry->s.ops_data);
+	return -1;
+}
+
+static int tap_pktio_start(pktio_entry_t *pktio_entry)
+{
+	struct ifreq ifr;
+	pktio_ops_tap_data_t *tap = pktio_entry->s.ops_data;
+
+	odp_memset(&ifr, 0, sizeof(ifr));
+	snprintf(ifr.ifr_name, IF_NAMESIZE, "%s",
+		 (char *)pktio_entry->s.name + 4);
+
+		/* Up interface by default. */
+	if (ioctl(tap->skfd, SIOCGIFFLAGS, &ifr) < 0) {
+		__odp_errno = errno;
+		ODP_ERR("ioctl(SIOCGIFFLAGS) failed: %s\n", strerror(errno));
+		goto sock_err;
+	}
+
+	ifr.ifr_flags |= IFF_UP;
+	ifr.ifr_flags |= IFF_RUNNING;
+
+	if (ioctl(tap->skfd, SIOCSIFFLAGS, &ifr) < 0) {
+		__odp_errno = errno;
+		ODP_ERR("failed to come up: %s\n", strerror(errno));
+		goto sock_err;
+	}
+
+	return 0;
+sock_err:
+	ODP_ERR("Tap device open failed.\n");
+	return -1;
+}
+
+static int tap_pktio_stop(pktio_entry_t *pktio_entry)
+{
+	struct ifreq ifr;
+	pktio_ops_tap_data_t *tap = pktio_entry->s.ops_data;
+
+	odp_memset(&ifr, 0, sizeof(ifr));
+	snprintf(ifr.ifr_name, IF_NAMESIZE, "%s",
+		 (char *)pktio_entry->s.name + 4);
+
+		/* Up interface by default. */
+	if (ioctl(tap->skfd, SIOCGIFFLAGS, &ifr) < 0) {
+		__odp_errno = errno;
+		ODP_ERR("ioctl(SIOCGIFFLAGS) failed: %s\n", strerror(errno));
+		goto sock_err;
+	}
+
+	ifr.ifr_flags &= ~IFF_UP;
+	ifr.ifr_flags &= ~IFF_RUNNING;
+
+	if (ioctl(tap->skfd, SIOCSIFFLAGS, &ifr) < 0) {
+		__odp_errno = errno;
+		ODP_ERR("failed to come up: %s\n", strerror(errno));
+		goto sock_err;
+	}
+
+	return 0;
+sock_err:
+	ODP_ERR("Tap device open failed.\n");
 	return -1;
 }
 
 static int tap_pktio_close(pktio_entry_t *pktio_entry)
 {
 	int ret = 0;
-	pkt_tap_t *tap = &pktio_entry->s.pkt_tap;
+	pktio_ops_tap_data_t *tap = pktio_entry->s.ops_data;
 
 	if (tap->fd != -1 && close(tap->fd) != 0) {
 		__odp_errno = errno;
@@ -180,12 +261,18 @@ static int tap_pktio_close(pktio_entry_t *pktio_entry)
 		ret = -1;
 	}
 
+	if (ODP_OPS_DATA_FREE(pktio_entry->s.ops_data)) {
+		ODP_ERR("ops_data_free(tap) failed\n");
+		ret = -1;
+	}
+
 	return ret;
 }
 
 static odp_packet_t pack_odp_pkt(pktio_entry_t *pktio_entry, const void *data,
 				 unsigned int len, odp_time_t *ts)
 {
+	pktio_ops_tap_data_t *tap = pktio_entry->s.ops_data;
 	odp_packet_t pkt;
 	odp_packet_hdr_t *pkt_hdr;
 	odp_packet_hdr_t parsed_hdr;
@@ -193,13 +280,12 @@ static odp_packet_t pack_odp_pkt(pktio_entry_t *pktio_entry, const void *data,
 
 	if (pktio_cls_enabled(pktio_entry)) {
 		if (cls_classify_packet(pktio_entry, data, len, len,
-					&pktio_entry->s.pkt_tap.pool,
-					&parsed_hdr)) {
+					&tap->pool, &parsed_hdr)) {
 			return ODP_PACKET_INVALID;
 		}
 	}
 
-	num = packet_alloc_multi(pktio_entry->s.pkt_tap.pool, len, &pkt, 1);
+	num = packet_alloc_multi(tap->pool, len, &pkt, 1);
 
 	if (num != 1)
 		return ODP_PACKET_INVALID;
@@ -230,7 +316,7 @@ static int tap_pktio_recv(pktio_entry_t *pktio_entry, int index ODP_UNUSED,
 	ssize_t retval;
 	int i;
 	uint8_t buf[BUF_SIZE];
-	pkt_tap_t *tap = &pktio_entry->s.pkt_tap;
+	pktio_ops_tap_data_t *tap = pktio_entry->s.ops_data;
 	odp_time_t ts_val;
 	odp_time_t *ts = NULL;
 
@@ -270,7 +356,7 @@ static int tap_pktio_send_lockless(pktio_entry_t *pktio_entry,
 	int i, n;
 	uint32_t pkt_len;
 	uint8_t buf[BUF_SIZE];
-	pkt_tap_t *tap = &pktio_entry->s.pkt_tap;
+	pktio_ops_tap_data_t *tap = pktio_entry->s.ops_data;
 
 	for (i = 0; i < len; i++) {
 		pkt_len = odp_packet_len(pkts[i]);
@@ -332,11 +418,11 @@ static int tap_pktio_send(pktio_entry_t *pktio_entry, int index ODP_UNUSED,
 static uint32_t tap_mtu_get(pktio_entry_t *pktio_entry)
 {
 	uint32_t ret;
+	pktio_ops_tap_data_t *tap = pktio_entry->s.ops_data;
 
-	ret =  mtu_get_fd(pktio_entry->s.pkt_tap.skfd,
-			  pktio_entry->s.name + 4);
+	ret =  mtu_get_fd(tap->skfd, pktio_entry->s.name + 4);
 	if (ret > 0)
-		pktio_entry->s.pkt_tap.mtu = ret;
+		tap->mtu = ret;
 
 	return ret;
 }
@@ -344,20 +430,42 @@ static uint32_t tap_mtu_get(pktio_entry_t *pktio_entry)
 static int tap_promisc_mode_set(pktio_entry_t *pktio_entry,
 				odp_bool_t enable)
 {
-	return promisc_mode_set_fd(pktio_entry->s.pkt_tap.skfd,
+	pktio_ops_tap_data_t *tap = pktio_entry->s.ops_data;
+
+	return promisc_mode_set_fd(tap->skfd,
 				   pktio_entry->s.name + 4, enable);
 }
 
 static int tap_promisc_mode_get(pktio_entry_t *pktio_entry)
 {
-	return promisc_mode_get_fd(pktio_entry->s.pkt_tap.skfd,
-				   pktio_entry->s.name + 4);
+	pktio_ops_tap_data_t *tap = pktio_entry->s.ops_data;
+
+	return promisc_mode_get_fd(tap->skfd, pktio_entry->s.name + 4);
 }
 
 static int tap_mac_addr_get(pktio_entry_t *pktio_entry, void *mac_addr)
 {
-	memcpy(mac_addr, pktio_entry->s.pkt_tap.if_mac, ETH_ALEN);
+	pktio_ops_tap_data_t *tap = pktio_entry->s.ops_data;
+
+	memcpy(mac_addr, tap->if_mac, ETH_ALEN);
 	return ETH_ALEN;
+}
+
+static int tap_mac_addr_set(pktio_entry_t *pktio_entry, const void *mac_addr)
+{
+	pktio_ops_tap_data_t *tap = pktio_entry->s.ops_data;
+
+	memcpy(tap->if_mac, mac_addr, ETH_ALEN);
+
+	return mac_addr_set_fd(tap->fd, (char *)pktio_entry->s.name + 4,
+			       tap->if_mac);
+}
+
+static int tap_link_status(pktio_entry_t *pktio_entry)
+{
+	pktio_ops_tap_data_t *tap = pktio_entry->s.ops_data;
+
+	return link_status_fd(tap->skfd, pktio_entry->s.name + 4);
 }
 
 static int tap_capability(pktio_entry_t *pktio_entry ODP_UNUSED,
@@ -368,6 +476,7 @@ static int tap_capability(pktio_entry_t *pktio_entry ODP_UNUSED,
 	capa->max_input_queues  = 1;
 	capa->max_output_queues = 1;
 	capa->set_op.op.promisc_mode = 1;
+	capa->set_op.op.mac_addr = 1;
 
 	odp_pktio_config_init(&capa->config);
 	capa->config.pktin.bit.ts_all = 1;
@@ -375,24 +484,47 @@ static int tap_capability(pktio_entry_t *pktio_entry ODP_UNUSED,
 	return 0;
 }
 
-const pktio_if_ops_t tap_pktio_ops = {
-	.name = "tap",
-	.print = NULL,
-	.init_global = NULL,
-	.init_local = NULL,
-	.term = NULL,
+static pktio_ops_module_t tap_pktio_ops = {
+	.base = {
+		.name = "tap",
+		.init_local = NULL,
+		.term_local = NULL,
+		.init_global = NULL,
+		.term_global = NULL,
+	},
 	.open = tap_pktio_open,
 	.close = tap_pktio_close,
-	.start = NULL,
-	.stop = NULL,
+	.start = tap_pktio_start,
+	.stop = tap_pktio_stop,
+	.stats = NULL,
+	.stats_reset = NULL,
+	.pktin_ts_res = NULL,
+	.pktin_ts_from_ns = NULL,
 	.recv = tap_pktio_recv,
 	.send = tap_pktio_send,
 	.mtu_get = tap_mtu_get,
 	.promisc_mode_set = tap_promisc_mode_set,
 	.promisc_mode_get = tap_promisc_mode_get,
 	.mac_get = tap_mac_addr_get,
+	.mac_set = tap_mac_addr_set,
+	.link_status = tap_link_status,
 	.capability = tap_capability,
-	.pktin_ts_res = NULL,
-	.pktin_ts_from_ns = NULL,
-	.config = NULL
+	.config = NULL,
+	.input_queues_config = NULL,
+	.output_queues_config = NULL,
+	.print = NULL,
 };
+
+ODP_MODULE_CONSTRUCTOR(tap_pktio_ops)
+{
+	odp_module_constructor(&tap_pktio_ops);
+
+	odp_subsystem_register_module(pktio_ops, &tap_pktio_ops);
+}
+
+/* Temporary variable to enable link this module,
+ * will remove in Makefile scheme changes.
+ */
+int enable_link_tap_pktio_ops = 0;
+
+#endif /* ODP_PKTIO_TAP */

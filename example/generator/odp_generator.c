@@ -32,6 +32,7 @@
 #define APPL_MODE_UDP    0			/**< UDP mode */
 #define APPL_MODE_PING   1			/**< ping mode */
 #define APPL_MODE_RCV    2			/**< receive mode */
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
 
 /** print appl mode */
 #define PRINT_APPL_MODE(x) printf("%s(%i)\n", #x, (x))
@@ -943,6 +944,7 @@ int main(int argc, char *argv[])
 	interface_t *ifs;
 	odp_instance_t instance;
 	odph_odpthread_params_t thr_params;
+	odp_timer_capability_t timer_capa;
 
 	/* Init ODP before calling anything else */
 	if (odp_init_global(&instance, NULL, NULL)) {
@@ -1028,7 +1030,12 @@ int main(int argc, char *argv[])
 	odp_pool_print(pool);
 
 	/* Create timer pool */
-	tparams.res_ns = 1 * ODP_TIME_MSEC_IN_NS;
+	if (odp_timer_capability(ODP_CLOCK_CPU, &timer_capa)) {
+		EXAMPLE_ERR("Error: get timer capacity failed.\n");
+		exit(EXIT_FAILURE);
+	}
+	tparams.res_ns = MAX(1 * ODP_TIME_MSEC_IN_NS,
+			     timer_capa.highest_res_ns);
 	tparams.min_tmo = 0;
 	tparams.max_tmo = 10000 * ODP_TIME_SEC_IN_NS;
 	tparams.num_timers = num_workers; /* One timer per worker */
@@ -1480,17 +1487,7 @@ static void print_info(char *progname, appl_args_t *appl_args)
 {
 	int i;
 
-	printf("\n"
-	       "ODP system info\n"
-	       "---------------\n"
-	       "ODP API version: %s\n"
-	       "CPU model:       %s\n"
-	       "CPU freq (hz):   %"PRIu64"\n"
-	       "Cache line size: %i\n"
-	       "CPU count:       %i\n"
-	       "\n",
-	       odp_version_api_str(), odp_cpu_model_str(), odp_cpu_hz_max(),
-	       odp_sys_cache_line_size(), odp_cpu_count());
+	odp_sys_info_print();
 
 	printf("Running ODP appl: \"%s\"\n"
 	       "-----------------\n"

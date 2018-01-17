@@ -43,10 +43,6 @@ typedef struct seg_entry_t {
 
 /* Common buffer header */
 struct odp_buffer_hdr_t {
-
-	/* Buffer index in the pool */
-	uint32_t  index;
-
 	/* Total segment count */
 	uint16_t  segcount;
 
@@ -71,8 +67,9 @@ struct odp_buffer_hdr_t {
 	/* --- 40 bytes --- */
 
 	/* Segments */
-	seg_entry_t seg[CONFIG_PACKET_MAX_SEGS];
+	seg_entry_t seg[CONFIG_PACKET_SEGS_PER_HDR];
 
+#ifndef ODP_SCHEDULE_SCALABLE
 	/* Burst counts */
 	uint8_t   burst_num;
 	uint8_t   burst_first;
@@ -82,7 +79,7 @@ struct odp_buffer_hdr_t {
 
 	/* Burst table */
 	struct odp_buffer_hdr_t *burst[BUFFER_BURST_SIZE];
-
+#endif
 	/* --- Mostly read only data --- */
 
 	/* User context pointer or u64 */
@@ -104,11 +101,11 @@ struct odp_buffer_hdr_t {
 	/* User area pointer */
 	void    *uarea_addr;
 
-	/* User area size */
-	uint32_t uarea_size;
-
 	/* Max data size */
 	uint32_t size;
+
+	/* Event subtype. Should be ODP_EVENT_NO_SUBTYPE except packets. */
+	int8_t    event_subtype;
 
 	/* ipc mapped process can not walk over pointers,
 	 * offset has to be used */
@@ -122,8 +119,8 @@ struct odp_buffer_hdr_t {
 	uint8_t data[0];
 } ODP_ALIGNED_CACHE;
 
-ODP_STATIC_ASSERT(CONFIG_PACKET_MAX_SEGS < 256,
-		  "CONFIG_PACKET_MAX_SEGS_TOO_LARGE");
+ODP_STATIC_ASSERT(CONFIG_PACKET_SEGS_PER_HDR < 256,
+		  "CONFIG_PACKET_SEGS_PER_HDR_TOO_LARGE");
 
 ODP_STATIC_ASSERT(BUFFER_BURST_SIZE < 256, "BUFFER_BURST_SIZE_TOO_LARGE");
 

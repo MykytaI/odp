@@ -7,10 +7,6 @@
 #ifndef ODP_CONFIG_INTERNAL_H_
 #define ODP_CONFIG_INTERNAL_H_
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 /*
  * Maximum number of pools
  */
@@ -20,6 +16,13 @@ extern "C" {
  * Maximum number of queues
  */
 #define ODP_CONFIG_QUEUES 1024
+
+/*
+ * Maximum queue depth. Maximum number of elements that can be stored in a
+ * queue. This value is used only when the size is not explicitly provided
+ * during queue creation.
+ */
+#define CONFIG_QUEUE_SIZE 4096
 
 /*
  * Maximum number of ordered locks per queue
@@ -75,7 +78,22 @@ extern "C" {
 /*
  * Maximum number of segments per packet
  */
-#define CONFIG_PACKET_MAX_SEGS 6
+#define CONFIG_PACKET_MAX_SEGS 255
+
+/*
+ * Packet segmentation disabled
+ */
+#define CONFIG_PACKET_SEG_DISABLED (CONFIG_PACKET_MAX_SEGS == 1)
+
+/*
+ * Number of segments stored in a packet header
+ */
+#define CONFIG_PACKET_SEGS_PER_HDR 6
+
+/*
+ * Maximum packet data length in bytes
+ */
+#define CONFIG_PACKET_MAX_LEN (64 * 1024)
 
 /*
  * Maximum packet segment size including head- and tailrooms
@@ -107,24 +125,6 @@ extern "C" {
 #define ODP_CONFIG_SHM_BLOCKS (ODP_CONFIG_POOLS + 48)
 
 /*
- * Maximum event burst size
- *
- * This controls the burst size on various enqueue, dequeue, etc calls. Large
- * burst size improves throughput, but may degrade QoS (increase latency).
- */
-#define CONFIG_BURST_SIZE 16
-
-/*
- * Maximum number of events in a pool
- */
-#define CONFIG_POOL_MAX_NUM (1 * 1024 * 1024)
-
-/*
- * Maximum number of events in a thread local pool cache
- */
-#define CONFIG_POOL_CACHE_SIZE 256
-
-/*
  * Size of the virtual address space pre-reserver for ISHM
  *
  * This is just virtual space preallocation size, not memory allocation.
@@ -134,8 +134,22 @@ extern "C" {
  */
 #define ODP_CONFIG_ISHM_VA_PREALLOC_SZ (536870912L)
 
-#ifdef __cplusplus
-}
-#endif
+/* Maximum number of shared memory blocks available on the driver interface.
+ *
+ * This the the number of separate SHM areas that can be reserved concurrently
+ */
+#define ODPDRV_CONFIG_SHM_BLOCKS 48
+
+/* Maximum event burst size
+ *
+ * This controls the burst size on various enqueue, dequeue, etc calls. Large
+ * burst size improves throughput, but may degrade QoS (increase latency).
+ */
+#define CONFIG_BURST_SIZE 16
+
+/*
+ * Maximum number of events in a thread local pool cache
+ */
+#define CONFIG_POOL_CACHE_SIZE 255
 
 #endif

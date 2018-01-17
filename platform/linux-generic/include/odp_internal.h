@@ -23,6 +23,7 @@ extern "C" {
 #include <odp_errno_define.h>
 #include <stdio.h>
 #include <sys/types.h>
+#include <libconfig.h>
 
 #define MAX_CPU_NUMBER 128
 #define UID_MAXLEN 30
@@ -53,6 +54,7 @@ struct odp_global_data_s {
 	odp_cpumask_t control_cpus;
 	odp_cpumask_t worker_cpus;
 	int num_cpus_installed;
+	config_t configuration;
 };
 
 enum init_stage {
@@ -72,6 +74,10 @@ enum init_stage {
 	CLASSIFICATION_INIT,
 	TRAFFIC_MNGR_INIT,
 	NAME_TABLE_INIT,
+	DRIVER_INIT,
+	IPSEC_EVENTS_INIT,
+	IPSEC_SAD_INIT,
+	MODULES_INIT,
 	ALL_INIT      /* All init stages completed */
 };
 
@@ -105,11 +111,18 @@ int odp_classification_term_global(void);
 
 int odp_queue_init_global(void);
 int odp_queue_term_global(void);
+int odp_queue_init_local(void);
+int odp_queue_term_local(void);
 
 int odp_crypto_init_global(void);
 int odp_crypto_term_global(void);
 
-int odp_timer_init_global(void);
+int odp_schedule_init_global(void);
+int odp_schedule_term_global(void);
+int odp_schedule_init_local(void);
+int odp_schedule_term_local(void);
+
+int odp_timer_init_global(const odp_init_t *params);
 int odp_timer_term_global(void);
 int odp_timer_disarm_all(void);
 
@@ -130,10 +143,50 @@ int _odp_ishm_init_local(void);
 int _odp_ishm_term_global(void);
 int _odp_ishm_term_local(void);
 
+int _odpdrv_driver_init_global(void);
+int _odpdrv_driver_init_local(void);
+int _odpdrv_driver_term_global(void);
+
+int _odp_ipsec_sad_init_global(void);
+int _odp_ipsec_sad_term_global(void);
+
+int _odp_ipsec_events_init_global(void);
+int _odp_ipsec_events_term_global(void);
+
+int _odp_modules_init_global(void);
+
 int cpuinfo_parser(FILE *file, system_info_t *sysinfo);
 uint64_t odp_cpufreq_id(const char *filename, int id);
 uint64_t odp_cpu_hz_current(int id);
+uint64_t odp_cpu_arch_hz_current(int id);
 void sys_info_print_arch(void);
+
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+
+#define MIN(a, b)				\
+	({					\
+		__typeof__(a) tmp_a = (a);	\
+		__typeof__(b) tmp_b = (b);	\
+		tmp_a < tmp_b ? tmp_a : tmp_b;	\
+	})
+#define MAX(a, b)				\
+	({					\
+		__typeof__(a) tmp_a = (a);	\
+		__typeof__(b) tmp_b = (b);	\
+		tmp_a > tmp_b ? tmp_a : tmp_b;	\
+	})
+
+#define odp_container_of(pointer, type, member) \
+	((type *)(void *)(((char *)pointer) - offsetof(type, member)))
+
+#define DIV_ROUND_UP(a, b)					\
+	({							\
+		__typeof__(a) tmp_a = (a);			\
+		__typeof__(b) tmp_b = (b);			\
+		ODP_STATIC_ASSERT(__builtin_constant_p(b), "");	\
+		ODP_STATIC_ASSERT((((b) - 1) & (b)) == 0, "");	\
+		(tmp_a + tmp_b - 1) >> __builtin_ctz(tmp_b);	\
+	})
 
 #ifdef __cplusplus
 }
